@@ -1,0 +1,41 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage and test outputs
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+pip-wheel-metadata/
+
+# IDE/editor files
+.idea/
+.vscode/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+__MACOSX/
+
+# macOS AppleDouble sidecar files
+._*
