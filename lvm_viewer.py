@@ -1,7 +1,8 @@
 import os
 import sys
+import hashlib
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox, simpledialog
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,6 +21,30 @@ MAX_FFT_SAMPLES = 8192  # Max samples used for spectrum calculation in Hz mode
 CACHE_VERSION = 2  # Bump if cached payload format changes
 UI_SYNC_FRAME_STRIDE = 4  # Update heavy UI widgets every N frames during playback
 ANIMATION_DEFAULT_ENABLED = True
+PERF_PROFILES = {
+    "fast": {
+        "fps": 24,
+        "render_points": 2500,
+        "fft_samples": 4096,
+        "ui_sync_stride": 8,
+        "label": "Fast",
+    },
+    "balanced": {
+        "fps": 36,
+        "render_points": 4500,
+        "fft_samples": 8192,
+        "ui_sync_stride": 4,
+        "label": "Balanced",
+    },
+    "quality": {
+        "fps": 60,
+        "render_points": 8000,
+        "fft_samples": 16384,
+        "ui_sync_stride": 2,
+        "label": "Quality",
+    },
+}
+DEFAULT_PERF_PROFILE = "balanced"
 time_range_ref = [1.0]
 channel_visibility = []
 channel_data_arrays = []
@@ -60,6 +85,99 @@ def select_file(exit_on_cancel=True):
         return None
 
     return file_path
+
+
+def select_processing_range(time_values):
+    """Ask user which time range should be processed and displayed."""
+    if len(time_values) == 0:
+        return None
+
+    full_start = float(time_values[0])
+    full_end = float(time_values[-1])
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+
+    prompt = (
+        "Choose time fragment to process.\n"
+        f"Available: {full_start:.9g} .. {full_end:.9g} s\n\n"
+        "Leave value unchanged to keep full range."
+    )
+
+    def parse_number(value_text, default_value):
+        text = (value_text or "").strip()
+        if not text:
+            return float(default_value)
+        return float(text.replace(",", "."))
+
+    try:
+        while True:
+            from_text = simpledialog.askstring(
+                "Processing Range",
+                prompt + "\n\nFrom time (s):",
+                initialvalue=f"{full_start:.9g}",
+                parent=root,
+            )
+            if from_text is None:
+                return None
+
+            to_text = simpledialog.askstring(
+                "Processing Range",
+                prompt + "\n\nTo time (s):",
+                initialvalue=f"{full_end:.9g}",
+                parent=root,
+            )
+            if to_text is None:
+                return None
+
+            try:
+                start = parse_number(from_text, full_start)
+                end = parse_number(to_text, full_end)
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid input",
+                    "Invalid number format. Use decimal values.",
+                    parent=root,
+                )
+                continue
+
+            if start > end:
+                start, end = end, start
+            start = max(full_start, min(full_end, start))
+            end = max(full_start, min(full_end, end))
+            if end <= start:
+                messagebox.showerror(
+                    "Invalid range",
+                    "Range is too small. Increase the interval.",
+                    parent=root,
+                )
+                continue
+            return start, end
+    finally:
+        root.destroy()
+
+
+def apply_processing_range(prepared, range_start, range_end):
+    """Return subset of prepared data for the selected time range."""
+    prepared_df, time_values, channel_frame, _ = prepared
+
+    if range_end < range_start:
+        range_start, range_end = range_end, range_start
+
+    # Time is monotonic after `prepare_loaded_data`, so use index slicing.
+    # This is much faster and avoids heavy boolean masking on large DataFrames.
+    start_idx = int(np.searchsorted(time_values, float(range_start), side="left"))
+    end_idx = int(np.searchsorted(time_values, float(range_end), side="right"))
+    if end_idx <= start_idx:
+        return None
+
+    subset_df = prepared_df.iloc[start_idx:end_idx].reset_index(drop=True)
+    subset_time = time_values[start_idx:end_idx].copy()
+    subset_channels = channel_frame.iloc[start_idx:end_idx].reset_index(drop=True)
+    if len(subset_df) == 0 or len(subset_channels.columns) == 0:
+        return None
+
+    return subset_df, subset_time, subset_channels, len(subset_df)
 
 
 # LVM FILE READING
@@ -214,8 +332,33 @@ def read_lvm_file(file_path):
     return df
 
 
+def get_cache_dir():
+    """Return platform-appropriate cache directory for this app."""
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
+            "~/AppData/Local"
+        )
+        return os.path.join(root, "LVMReader", "cache")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Caches/LVMReader")
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        return os.path.join(xdg_cache, "lvm-reader")
+    return os.path.expanduser("~/.cache/lvm-reader")
+
+
 def get_cache_path(file_path):
-    """Return cache file path next to source file."""
+    """Return canonical cache file path in the app cache directory."""
+    cache_dir = get_cache_dir()
+    os.makedirs(cache_dir, exist_ok=True)
+    abs_path = os.path.abspath(file_path)
+    path_hash = hashlib.sha1(abs_path.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    base_name = os.path.basename(file_path)
+    return os.path.join(cache_dir, f"{base_name}.{path_hash}.lvmcache.npz")
+
+
+def get_legacy_cache_path(file_path):
+    """Return legacy sidecar cache path kept for backward compatibility."""
     directory = os.path.dirname(file_path)
     base_name = os.path.basename(file_path)
     return os.path.join(directory, f"{base_name}.lvmcache.npz")
@@ -223,13 +366,12 @@ def get_cache_path(file_path):
 
 def load_prepared_data_from_cache(file_path):
     """Load prepared data tuple from a local .npz cache if it is valid."""
-    cache_path = get_cache_path(file_path)
-    if not os.path.exists(cache_path):
-        return None
+    canonical_cache_path = get_cache_path(file_path)
+    legacy_cache_path = get_legacy_cache_path(file_path)
+    source_stat = os.stat(file_path)
 
-    try:
-        source_stat = os.stat(file_path)
-        with np.load(cache_path, allow_pickle=False) as cached:
+    def load_from_path(path):
+        with np.load(path, allow_pickle=False) as cached:
             if int(cached["cache_version"]) != CACHE_VERSION:
                 return None
             if int(cached["source_size"]) != int(source_stat.st_size):
@@ -246,17 +388,34 @@ def load_prepared_data_from_cache(file_path):
             channel_data = channel_data.reshape(-1, 1)
 
         channels_frame = pd.DataFrame(channel_data, columns=channel_names)
-        prepared_df = pd.concat(
-            [pd.Series(time_raw, name="Time"), channels_frame], axis=1
-        )
+        prepared_df = pd.concat([pd.Series(time_raw, name="Time"), channels_frame], axis=1)
 
         if channels_frame.empty or len(time_values) == 0:
             return None
         if len(channels_frame) != len(time_values):
             return None
-
-        print(f"Loaded from cache: {os.path.basename(cache_path)}")
         return prepared_df, time_values, channels_frame, len(prepared_df)
+
+    try:
+        if os.path.exists(canonical_cache_path):
+            prepared = load_from_path(canonical_cache_path)
+            if prepared is not None:
+                print(f"Loaded from cache: {os.path.basename(canonical_cache_path)}")
+                return prepared
+
+        if os.path.exists(legacy_cache_path):
+            prepared = load_from_path(legacy_cache_path)
+            if prepared is not None:
+                print(f"Loaded from legacy cache: {os.path.basename(legacy_cache_path)}")
+                # One-time migration to canonical cache location.
+                save_prepared_data_to_cache(file_path, prepared)
+                try:
+                    os.remove(legacy_cache_path)
+                    print("Legacy sidecar cache moved to app cache directory.")
+                except OSError:
+                    pass
+                return prepared
+        return None
     except Exception as e:
         print(f"Cache load error: {e}")
         return None
@@ -388,56 +547,68 @@ def reload_with_new_file(event=None):
     if not new_file:
         return
 
-    FILE = new_file
-    print(f"Loading new file: {FILE}")
+    print(f"Loading new file: {new_file}")
     is_loading_data = True
     set_status_text("Loading file...", color="tab:orange", redraw=True)
+    try:
+        prepared = load_prepared_data_from_cache(new_file)
+        if prepared is None:
+            new_df = read_lvm_file(new_file)
+            set_status_text("Processing data...", color="tab:orange", redraw=True)
+            prepared = prepare_loaded_data(new_df)
+            if prepared is not None:
+                set_status_text("Saving cache...", color="tab:orange", redraw=True)
+                save_prepared_data_to_cache(new_file, prepared)
+        else:
+            set_status_text("Loaded from cache", color="tab:green", redraw=True)
 
-    prepared = load_prepared_data_from_cache(FILE)
-    if prepared is None:
-        new_df = read_lvm_file(FILE)
-        set_status_text("Processing data...", color="tab:orange", redraw=True)
-        prepared = prepare_loaded_data(new_df)
-        if prepared is not None:
-            set_status_text("Saving cache...", color="tab:orange", redraw=True)
-            save_prepared_data_to_cache(FILE, prepared)
-    else:
-        set_status_text("Loaded from cache", color="tab:green", redraw=True)
+        if prepared is None:
+            print("Failed to prepare data from the new file.")
+            set_status_text("Load failed", color="tab:red", redraw=True)
+            return
 
-    if prepared is None:
-        print("Failed to prepare data from the new file.")
-        set_status_text("Load failed", color="tab:red", redraw=True)
+        set_status_text("Select processing range...", color="tab:orange", redraw=True)
+        selected_range = select_processing_range(prepared[1])
+        if selected_range is None:
+            print("Processing range selection canceled.")
+            set_status_text("Range selection canceled", color="tab:orange", redraw=True)
+            return
+        prepared = apply_processing_range(prepared, selected_range[0], selected_range[1])
+        if prepared is None:
+            print("Selected range has no data.")
+            set_status_text("Selected range has no data", color="tab:red", redraw=True)
+            return
+
+        FILE = new_file
+        _, time, channels, n = prepared
+        channel_data_arrays = [
+            channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
+        ]
+        print(f"Loaded {len(channels.columns)} channels, {n} samples")
+        print(f"Time range: {time[0]} - {time[-1]}")
+
+        new_time_range = time[-1] - time[0]
+        if new_time_range == 0:
+            new_time_range = 1
+        time_range_ref[0] = new_time_range
+
+        # Reset playback state.
+        current_frame[0] = 0
+        is_playing[0] = False
+        current_center[0] = time[0] + (time[-1] - time[0]) * INITIAL_WINDOW_SIZE * 0.8
+        if callable(clear_probe_fn):
+            clear_probe_fn()
+
+        # Refresh plot and labels.
+        update_plot_data()
+        if callable(update_zoom_fn):
+            update_zoom_fn(zoom_level[0])
+        if callable(draw_frame_fn):
+            draw_frame_fn()
+        update_info_text()
+        set_status_text("Ready", color="tab:green", redraw=True)
+    finally:
         is_loading_data = False
-        return
-
-    _, time, channels, n = prepared
-    channel_data_arrays = [
-        channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
-    ]
-    print(f"Loaded {len(channels.columns)} channels, {n} samples")
-    print(f"Time range: {time[0]} - {time[-1]}")
-
-    new_time_range = time[-1] - time[0]
-    if new_time_range == 0:
-        new_time_range = 1
-    time_range_ref[0] = new_time_range
-
-    # Reset playback state.
-    current_frame[0] = 0
-    is_playing[0] = False
-    current_center[0] = time[0] + (time[-1] - time[0]) * INITIAL_WINDOW_SIZE * 0.8
-    if callable(clear_probe_fn):
-        clear_probe_fn()
-
-    # Refresh plot and labels.
-    update_plot_data()
-    if callable(update_zoom_fn):
-        update_zoom_fn(zoom_level[0])
-    if callable(draw_frame_fn):
-        draw_frame_fn()
-    update_info_text()
-    set_status_text("Ready", color="tab:green", redraw=True)
-    is_loading_data = False
 
 
 def update_plot_data():
@@ -546,6 +717,16 @@ def main():
         set_status_text("Load failed", color="tab:red", redraw=True)
         sys.exit()
 
+    set_status_text("Select processing range...", color="tab:orange", redraw=True)
+    selected_range = select_processing_range(prepared[1])
+    if selected_range is None:
+        print("Processing range selection canceled. Exiting.")
+        sys.exit()
+    prepared = apply_processing_range(prepared, selected_range[0], selected_range[1])
+    if prepared is None:
+        print("Selected range has no data. Exiting.")
+        sys.exit()
+
     _, time, channels, n = prepared
     channel_data_arrays = [
         channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
@@ -574,6 +755,11 @@ def main():
     last_slider_frame = [-1]
     window_size = [time_range * INITIAL_WINDOW_SIZE]
     zoom_level = [50]
+    perf_profile_key = [DEFAULT_PERF_PROFILE]
+    fps_ref = [PERF_PROFILES[DEFAULT_PERF_PROFILE]["fps"]]
+    render_points_ref = [PERF_PROFILES[DEFAULT_PERF_PROFILE]["render_points"]]
+    fft_samples_ref = [PERF_PROFILES[DEFAULT_PERF_PROFILE]["fft_samples"]]
+    ui_sync_stride_ref = [PERF_PROFILES[DEFAULT_PERF_PROFILE]["ui_sync_stride"]]
     # Allow deep zoom from Window input below 1% (e.g. 0.5%, 0.1%).
     min_zoom_scale = 0.0001
     max_zoom_scale = 1.0
@@ -802,7 +988,7 @@ def main():
 
         channel_control["widget"].on_clicked(on_channel_toggle)
 
-    last_ui_sync_frame = [-UI_SYNC_FRAME_STRIDE]
+    last_ui_sync_frame = [-int(ui_sync_stride_ref[0])]
     freq_render_cache = {
         "signature": None,
         "freq_view": None,
@@ -818,13 +1004,14 @@ def main():
 
         start_idx, end_idx = get_display_window_indices()
         span = max(0, end_idx - start_idx)
+        max_points = max(500, int(render_points_ref[0]))
 
         y_min = np.inf
         y_max = -np.inf
 
         if x_axis_mode[0] == "time":
             freq_render_cache["signature"] = None
-            step = max(1, span // MAX_RENDER_POINTS) if span > MAX_RENDER_POINTS else 1
+            step = max(1, span // max_points) if span > max_points else 1
             time_view = time[start_idx:end_idx:step]
 
             for i, _ in enumerate(channels.columns):
@@ -852,9 +1039,10 @@ def main():
                 signature = (start_idx, end_idx, visible_indices)
 
                 if signature != freq_render_cache["signature"]:
-                    if span > MAX_FFT_SAMPLES:
+                    max_fft_samples = max(1024, int(fft_samples_ref[0]))
+                    if span > max_fft_samples:
                         sample_idx = np.linspace(
-                            start_idx, end_idx - 1, MAX_FFT_SAMPLES, dtype=int
+                            start_idx, end_idx - 1, max_fft_samples, dtype=int
                         )
                     else:
                         sample_idx = np.arange(start_idx, end_idx, dtype=int)
@@ -881,8 +1069,8 @@ def main():
                         return
 
                     f_step = (
-                        max(1, freq_template.size // MAX_RENDER_POINTS)
-                        if freq_template.size > MAX_RENDER_POINTS
+                        max(1, freq_template.size // max_points)
+                        if freq_template.size > max_points
                         else 1
                     )
                     freq_view = freq_template[::f_step]
@@ -933,7 +1121,7 @@ def main():
         apply_dynamic_ylim(y_min, y_max)
 
         should_sync_ui = force_ui_sync or (not is_playing[0]) or (
-            current_frame[0] - last_ui_sync_frame[0] >= UI_SYNC_FRAME_STRIDE
+            current_frame[0] - last_ui_sync_frame[0] >= int(ui_sync_stride_ref[0])
         )
         if should_sync_ui:
             if not slider_lock[0] and n > 1:
@@ -1000,6 +1188,7 @@ def main():
     ax_anim = plt.axes([0.6, 0.18, 0.12, 0.06])
     ax_mode = plt.axes([0.73, 0.18, 0.10, 0.06])
     ax_probe = plt.axes([0.84, 0.18, 0.14, 0.06])
+    ax_perf = plt.axes([0.84, 0.24, 0.14, 0.05])
 
     btn_back = Button(ax_back, "Back")
     btn_play = Button(ax_play, "Play")
@@ -1009,6 +1198,7 @@ def main():
     btn_anim = Button(ax_anim, "Anim: On")
     btn_mode = Button(ax_mode, "X: Hz")
     btn_probe = Button(ax_probe, "Probe: Off")
+    btn_perf = Button(ax_perf, "Perf: Bal")
 
     probe_enabled = [False]
     probe_artist = {"point": None, "text": None}
@@ -1115,6 +1305,42 @@ def main():
     def toggle_probe(event=None):
         set_probe_enabled(not probe_enabled[0])
 
+    def set_performance_profile(profile_key):
+        key = str(profile_key).lower()
+        if key not in PERF_PROFILES:
+            return
+        profile = PERF_PROFILES[key]
+        perf_profile_key[0] = key
+        fps_ref[0] = int(profile["fps"])
+        render_points_ref[0] = int(profile["render_points"])
+        fft_samples_ref[0] = int(profile["fft_samples"])
+        ui_sync_stride_ref[0] = int(profile["ui_sync_stride"])
+        last_ui_sync_frame[0] = -int(ui_sync_stride_ref[0])
+        freq_render_cache["signature"] = None
+
+        short_label = {"fast": "Fast", "balanced": "Bal", "quality": "Qual"}.get(
+            key, profile["label"]
+        )
+        btn_perf.label.set_text(f"Perf: {short_label}")
+
+        if ani_ref[0] is not None:
+            ani_ref[0].event_source.interval = 1000.0 / max(1, fps_ref[0])
+
+        set_status_text(
+            f"Performance: {profile['label']} (FPS={fps_ref[0]})",
+            color="tab:green",
+            redraw=False,
+        )
+        draw_frame(force_ui_sync=True)
+
+    def cycle_performance_profile(event=None):
+        order = ["fast", "balanced", "quality"]
+        try:
+            idx = order.index(perf_profile_key[0])
+        except ValueError:
+            idx = 0
+        set_performance_profile(order[(idx + 1) % len(order)])
+
     def set_animation_enabled(enabled):
         animation_enabled[0] = bool(enabled)
         if animation_enabled[0]:
@@ -1188,6 +1414,7 @@ def main():
     btn_anim.on_clicked(toggle_animation)
     btn_mode.on_clicked(toggle_axis_mode)
     btn_probe.on_clicked(toggle_probe)
+    btn_perf.on_clicked(cycle_performance_profile)
     clear_probe_fn = clear_probe
 
     # Time slider.
@@ -1369,6 +1596,8 @@ def main():
             toggle_animation()
         elif event.key == "m":
             toggle_axis_mode()
+        elif event.key == "p":
+            cycle_performance_profile()
         elif event.key == "v":
             toggle_probe()
         elif event.key == "escape":
@@ -1384,15 +1613,16 @@ def main():
     controls_text = "\n".join(
         [
             "Controls: Space - pause/play, Left/Right - seek, Up/Down - detail, Home/End - start/end",
-            "A - animation on/off, M - time/Hz mode, V - probe on/off, Esc - clear probe",
+            "A - animation on/off, M - time/Hz mode, P - performance profile, V - probe on/off, Esc - clear probe",
             "Ctrl+O/Cmd+O - open file, Channels panel - toggle visibility, Position/Window - Enter",
         ]
     )
     plt.figtext(0.05, 0.915, controls_text, fontsize=8.2, ha="left", style="italic")
 
     ani_ref[0] = FuncAnimation(
-        fig, update, interval=1000 / FPS, blit=False, cache_frame_data=False
+        fig, update, interval=1000 / max(1, fps_ref[0]), blit=False, cache_frame_data=False
     )
+    set_performance_profile(DEFAULT_PERF_PROFILE)
     set_animation_enabled(ANIMATION_DEFAULT_ENABLED)
     update_zoom(50)
     draw_frame()

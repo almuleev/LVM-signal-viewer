@@ -1,6 +1,6 @@
-# LVM Reader
+# LVM-signal-viewer
 
-A lightweight desktop viewer for fast inspection of LabVIEW Measurement (`.lvm`) signal data.
+Simple desktop app to open, plot, and inspect LabVIEW .lvm measurement files without writing scripts.
 
 ## Motivation
 
@@ -13,11 +13,13 @@ Large LVM exports are often hard to inspect quickly in spreadsheets. This tool i
 - Auto-drop pseudo-channels that duplicate the time axis.
 - Monotonic time reconstruction for sectioned (`Multi_Headings`) files.
 - Interactive channel visibility panel (default: first channel enabled).
+- Pre-processing time-range selection (`From` / `To`) before rendering.
 - Timeline navigation with `Timeline` slider, `Position (%)` and `Window (%)` inputs, and playback controls (`Play`, `Pause`, `Back`, `Forward`).
 - Optional animation on/off toggle for performance (`Anim: On/Off`).
+- Performance profiles (`Fast`, `Balanced`, `Quality`) for weaker/stronger machines.
 - Dual X-axis mode: `X: Time` (seconds) and `X: Hz` (FFT spectrum for current visible window).
 - Point probe tool (`Probe`) to click and read exact values.
-- Local cache (`.lvmcache.npz`) next to source file for faster reopen.
+- Local app cache (`.lvmcache.npz`) in the OS cache directory for faster reopen.
 
 ## Installation
 
