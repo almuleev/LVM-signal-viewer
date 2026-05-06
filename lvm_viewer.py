@@ -7,15 +7,32 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, Slider
+from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
 
 # GENERAL SETTINGS
 FILE = ""  # File is selected through a dialog
 FPS = 60  # Values above 100 are usually not recommended
 STEP = 20  # Seek step
 INITIAL_WINDOW_SIZE = 0.2  # Initial view window size (20% of full time range)
+PARSER_VERBOSE = False  # Detailed section-level parser logging
+MAX_RENDER_POINTS = 6000  # Max points per visible line for responsive rendering
+MAX_FFT_SAMPLES = 8192  # Max samples used for spectrum calculation in Hz mode
+CACHE_VERSION = 2  # Bump if cached payload format changes
+UI_SYNC_FRAME_STRIDE = 4  # Update heavy UI widgets every N frames during playback
+ANIMATION_DEFAULT_ENABLED = True
+time_range_ref = [1.0]
+channel_visibility = []
+channel_data_arrays = []
+refresh_channel_controls_fn = None
+apply_channel_visibility_fn = None
 update_zoom_fn = None
 draw_frame_fn = None
+clear_probe_fn = None
+status_text_obj = None
+is_loading_data = False
+info_text_obj = None
+file_info_obj = None
+window_percent_ref = [0.0]
 
 
 # FILE SELECTION
@@ -49,27 +66,6 @@ def select_file(exit_on_cancel=True):
 def read_lvm_file(file_path):
     print(f"Reading LVM file: {os.path.basename(file_path)}")
 
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.readlines()
-    except Exception as e:
-        print(f"File read error: {e}")
-        return pd.DataFrame()
-
-    # Find all header terminators.
-    header_ends = []
-    for i, line in enumerate(content):
-        if "***End_of_Header***" in line:
-            header_ends.append(i)
-
-    if header_ends:
-        print(
-            f"Header end markers found: {len(header_ends)} "
-            f"(first: {header_ends[0]}, last: {header_ends[-1]})"
-        )
-    else:
-        print("Header end markers found: 0")
-
     metadata_keys = {
         "LabVIEW Measurement",
         "Writer_Version",
@@ -89,83 +85,126 @@ def read_lvm_file(file_path):
         "X0",
         "Delta_X",
     }
+    nan_value = float("nan")
 
     def is_metadata_line(line):
-        first_cell = line.split("\t", 1)[0].strip()
+        first_cell = line.partition("\t")[0].strip()
         return first_cell in metadata_keys
 
-    # Build parse windows after each header end marker.
-    if header_ends:
-        windows = []
-        for i, header_end in enumerate(header_ends):
-            start = header_end + 1
-            end = header_ends[i + 1] if i + 1 < len(header_ends) else len(content)
-            windows.append((start, end))
-    else:
-        windows = [(0, len(content))]
+    # Stream parse rows and build columns incrementally to avoid keeping a full
+    # in-memory copy of the source file.
+    columns = []
+    column_has_non_nan = []
+    row_count = 0
 
-    # Collect all data rows from all windows.
-    data_lines = []
+    header_count = 0
+    first_header_line = None
+    last_header_line = None
+    current_section_idx = 0
     section_hits = 0
-    for section_idx, (start, end) in enumerate(windows, start=1):
-        found_data_in_section = False
 
-        for line_index in range(start, end):
-            line = content[line_index].strip()
-            if not line or line.startswith("***") or is_metadata_line(line):
-                continue
+    section_has_data = False
 
-            # Normalize decimal commas and split by tabs.
-            line_clean = line.replace(",", ".")
-            parts = line_clean.split("\t")
-            parts = [p.strip() for p in parts if p.strip()]
-
-            # Keep only numeric values.
-            numeric_parts = []
-            for part in parts:
-                try:
-                    num = float(part)
-                    numeric_parts.append(num)
-                except ValueError:
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line_index, raw_line in enumerate(f):
+                line = raw_line.strip()
+                if not line:
                     continue
 
-            # Minimum expected shape: time + one value.
-            if len(numeric_parts) >= 2:
-                if not found_data_in_section:
-                    print(
-                        f"Numeric data found in section {section_idx} at line {line_index}: "
-                        f"{numeric_parts[:2]}..."
-                    )
-                    found_data_in_section = True
+                if line.startswith("***End_of_Header***"):
+                    header_count += 1
+                    if first_header_line is None:
+                        first_header_line = line_index
+                    last_header_line = line_index
+                    current_section_idx = header_count
+                    section_has_data = False
+                    continue
+
+                if line.startswith("***") or is_metadata_line(line):
+                    continue
+
+                # Normalize decimal commas and split by tabs.
+                line_clean = line.replace(",", ".")
+                parts = line_clean.split("\t")
+
+                # Keep only numeric values.
+                numeric_parts = []
+                for part in parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+                    try:
+                        numeric_parts.append(float(part))
+                    except ValueError:
+                        continue
+
+                part_count = len(numeric_parts)
+                if part_count < 2:
+                    continue
+
+                if not section_has_data:
+                    section_has_data = True
                     section_hits += 1
-                data_lines.append(numeric_parts)
+                    if PARSER_VERBOSE:
+                        print(
+                            f"Numeric data found in section {current_section_idx} at line {line_index}: "
+                            f"{numeric_parts[:2]}..."
+                        )
+
+                # Dynamically widen the column store when needed.
+                col_count = len(columns)
+                if part_count > col_count:
+                    additional_cols = part_count - col_count
+                    for _ in range(additional_cols):
+                        columns.append([nan_value] * row_count)
+                        column_has_non_nan.append(False)
+                    col_count = len(columns)
+
+                # Fast path: fixed-width rows (most common in LVM data sections).
+                if part_count == col_count:
+                    for col_idx, value in enumerate(numeric_parts):
+                        columns[col_idx].append(value)
+                        if value == value:  # Fast NaN check.
+                            column_has_non_nan[col_idx] = True
+                else:
+                    for col_idx, value in enumerate(numeric_parts):
+                        columns[col_idx].append(value)
+                        if value == value:
+                            column_has_non_nan[col_idx] = True
+                    for col_idx in range(part_count, col_count):
+                        columns[col_idx].append(nan_value)
+                row_count += 1
+    except Exception as e:
+        print(f"File read error: {e}")
+        return pd.DataFrame()
+
+    if header_count:
+        if PARSER_VERBOSE:
+            print(
+                f"Header end markers found: {header_count} "
+                f"(first: {first_header_line}, last: {last_header_line})"
+            )
+        else:
+            print(f"Header end markers found: {header_count}")
+    else:
+        print("Header end markers found: 0")
 
     print(f"Sections with numeric data: {section_hits}")
 
-    print(f"Collected {len(data_lines)} data rows")
+    print(f"Collected {row_count} data rows")
 
-    if not data_lines:
+    if row_count == 0 or not columns:
         print("No numeric data found")
         return pd.DataFrame()
 
-    # Build a DataFrame from collected rows.
-    max_cols = max(len(row) for row in data_lines)
+    # Build DataFrame from the assembled columns.
+    max_cols = len(columns)
     print(f"Maximum column count: {max_cols}")
-
-    all_data = []
-    for i in range(max_cols):
-        column_data = []
-        for row in data_lines:
-            if i < len(row):
-                column_data.append(row[i])
-            else:
-                column_data.append(np.nan)
-        all_data.append(column_data)
-
-    data_dict = {"Time": all_data[0]}  # First column is time.
-    for i in range(1, len(all_data)):
-        if not all(np.isnan(x) for x in all_data[i]):
-            data_dict[f"Channel_{i}"] = all_data[i]
+    data_dict = {"Time": columns[0]}  # First column is time.
+    for i in range(1, max_cols):
+        if i < len(column_has_non_nan) and column_has_non_nan[i]:
+            data_dict[f"Channel_{i}"] = columns[i]
 
     df = pd.DataFrame(data_dict)
     df = df.dropna(subset=["Time"])
@@ -175,20 +214,161 @@ def read_lvm_file(file_path):
     return df
 
 
+def get_cache_path(file_path):
+    """Return cache file path next to source file."""
+    directory = os.path.dirname(file_path)
+    base_name = os.path.basename(file_path)
+    return os.path.join(directory, f"{base_name}.lvmcache.npz")
+
+
+def load_prepared_data_from_cache(file_path):
+    """Load prepared data tuple from a local .npz cache if it is valid."""
+    cache_path = get_cache_path(file_path)
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        source_stat = os.stat(file_path)
+        with np.load(cache_path, allow_pickle=False) as cached:
+            if int(cached["cache_version"]) != CACHE_VERSION:
+                return None
+            if int(cached["source_size"]) != int(source_stat.st_size):
+                return None
+            if int(cached["source_mtime_ns"]) != int(source_stat.st_mtime_ns):
+                return None
+
+            time_raw = cached["time_raw"]
+            time_values = cached["time_values"]
+            channel_names = cached["channel_names"].tolist()
+            channel_data = cached["channel_data"]
+
+        if channel_data.ndim == 1:
+            channel_data = channel_data.reshape(-1, 1)
+
+        channels_frame = pd.DataFrame(channel_data, columns=channel_names)
+        prepared_df = pd.concat(
+            [pd.Series(time_raw, name="Time"), channels_frame], axis=1
+        )
+
+        if channels_frame.empty or len(time_values) == 0:
+            return None
+        if len(channels_frame) != len(time_values):
+            return None
+
+        print(f"Loaded from cache: {os.path.basename(cache_path)}")
+        return prepared_df, time_values, channels_frame, len(prepared_df)
+    except Exception as e:
+        print(f"Cache load error: {e}")
+        return None
+
+
+def save_prepared_data_to_cache(file_path, prepared_tuple):
+    """Save prepared data tuple to a local .npz cache next to source file."""
+    cache_path = get_cache_path(file_path)
+    prepared_df, time_values, channel_frame, _ = prepared_tuple
+
+    try:
+        source_stat = os.stat(file_path)
+        np.savez_compressed(
+            cache_path,
+            cache_version=np.array(CACHE_VERSION, dtype=np.int64),
+            source_size=np.array(source_stat.st_size, dtype=np.int64),
+            source_mtime_ns=np.array(source_stat.st_mtime_ns, dtype=np.int64),
+            time_raw=prepared_df["Time"].to_numpy(dtype=float, copy=False),
+            time_values=np.asarray(time_values, dtype=float),
+            channel_names=np.asarray(channel_frame.columns, dtype="U"),
+            channel_data=channel_frame.to_numpy(dtype=float, copy=False),
+        )
+        print(f"Cache saved: {os.path.basename(cache_path)}")
+    except Exception as e:
+        print(f"Cache save skipped: {e}")
+
+
 def prepare_loaded_data(df):
-    """Normalize loaded data and validate minimum structure."""
+    """Validate parsed data and return plotting-ready structures."""
     if df.empty:
         return None
 
-    prepared = df.copy()
-    prepared["Time"] = pd.to_numeric(prepared["Time"], errors="coerce")
-    prepared = prepared.dropna(subset=["Time"])
-    if prepared.empty:
-        print("No valid numeric timestamps after parsing.")
+    if "Time" not in df.columns:
+        print("Missing required 'Time' column.")
         return None
 
-    time_values = prepared["Time"].to_numpy()
+    # `read_lvm_file` already produces numeric values and drops invalid `Time`.
+    prepared = df
+    raw_time = prepared["Time"].to_numpy(dtype=float)
+    time_values = raw_time.copy()
+    if len(time_values) == 0:
+        print("No valid timestamps after parsing.")
+        return None
+
+    # Build a monotonic plotting timeline to avoid zig-zag artifacts when
+    # Multi_Headings sections reset local time back to the start.
+    if len(time_values) > 1:
+        diffs = np.diff(time_values)
+        positive_diffs = diffs[diffs > 0]
+        fallback_step = float(np.median(positive_diffs)) if positive_diffs.size else 1e-6
+        if fallback_step <= 0:
+            fallback_step = 1e-6
+
+        offset = 0.0
+        for i in range(1, len(time_values)):
+            candidate = raw_time[i] + offset
+            if candidate < time_values[i - 1]:
+                offset = time_values[i - 1] + fallback_step - raw_time[i]
+                candidate = raw_time[i] + offset
+            time_values[i] = candidate
+
     channel_frame = prepared.drop(columns=["Time"])
+
+    # Drop pseudo-channels that are actually duplicated X/time columns.
+    duplicate_time_channels = []
+
+    def is_duplicate_time_column(col_values, ref_time):
+        valid_mask = np.isfinite(col_values) & np.isfinite(ref_time)
+        if not valid_mask.any():
+            return False
+
+        valid_idx = np.flatnonzero(valid_mask)
+        sample_size = min(2048, valid_idx.size)
+        if sample_size == 0:
+            return False
+
+        if valid_idx.size > sample_size:
+            sample_idx = valid_idx[
+                np.linspace(0, valid_idx.size - 1, sample_size, dtype=int)
+            ]
+        else:
+            sample_idx = valid_idx
+
+        # Fast reject using sampled points, then exact check for positives.
+        if not np.allclose(
+            col_values[sample_idx],
+            ref_time[sample_idx],
+            rtol=1e-9,
+            atol=1e-12,
+        ):
+            return False
+
+        return np.allclose(
+            col_values[valid_idx],
+            ref_time[valid_idx],
+            rtol=1e-9,
+            atol=1e-12,
+        )
+
+    for col in channel_frame.columns:
+        col_values = channel_frame[col].to_numpy(dtype=float)
+        if is_duplicate_time_column(col_values, raw_time):
+            duplicate_time_channels.append(col)
+
+    if duplicate_time_channels:
+        channel_frame = channel_frame.drop(columns=duplicate_time_channels)
+        prepared = prepared.loc[:, ["Time", *channel_frame.columns]]
+        print(
+            "Dropped time-axis duplicate channels: "
+            f"{', '.join(duplicate_time_channels)}"
+        )
+
     if len(channel_frame.columns) == 0:
         print("No data channels available for display.")
         return None
@@ -199,29 +379,55 @@ def prepare_loaded_data(df):
 # RELOAD DATA WITH A NEW FILE
 def reload_with_new_file(event=None):
     """Reload viewer data from a newly selected file."""
-    global FILE, df, time, channels, n, current_frame, is_playing, current_center
+    global FILE, time, channels, n, current_frame, is_playing, current_center, time_range_ref
+    global channel_data_arrays, is_loading_data
 
+    if is_loading_data:
+        return
     new_file = select_file(exit_on_cancel=False)
     if not new_file:
         return
 
     FILE = new_file
     print(f"Loading new file: {FILE}")
+    is_loading_data = True
+    set_status_text("Loading file...", color="tab:orange", redraw=True)
 
-    new_df = read_lvm_file(FILE)
-    prepared = prepare_loaded_data(new_df)
+    prepared = load_prepared_data_from_cache(FILE)
+    if prepared is None:
+        new_df = read_lvm_file(FILE)
+        set_status_text("Processing data...", color="tab:orange", redraw=True)
+        prepared = prepare_loaded_data(new_df)
+        if prepared is not None:
+            set_status_text("Saving cache...", color="tab:orange", redraw=True)
+            save_prepared_data_to_cache(FILE, prepared)
+    else:
+        set_status_text("Loaded from cache", color="tab:green", redraw=True)
+
     if prepared is None:
         print("Failed to prepare data from the new file.")
+        set_status_text("Load failed", color="tab:red", redraw=True)
+        is_loading_data = False
         return
 
-    df, time, channels, n = prepared
+    _, time, channels, n = prepared
+    channel_data_arrays = [
+        channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
+    ]
     print(f"Loaded {len(channels.columns)} channels, {n} samples")
     print(f"Time range: {time[0]} - {time[-1]}")
 
+    new_time_range = time[-1] - time[0]
+    if new_time_range == 0:
+        new_time_range = 1
+    time_range_ref[0] = new_time_range
+
     # Reset playback state.
     current_frame[0] = 0
-    is_playing[0] = True
+    is_playing[0] = False
     current_center[0] = time[0] + (time[-1] - time[0]) * INITIAL_WINDOW_SIZE * 0.8
+    if callable(clear_probe_fn):
+        clear_probe_fn()
 
     # Refresh plot and labels.
     update_plot_data()
@@ -230,11 +436,13 @@ def reload_with_new_file(event=None):
     if callable(draw_frame_fn):
         draw_frame_fn()
     update_info_text()
+    set_status_text("Ready", color="tab:green", redraw=True)
+    is_loading_data = False
 
 
 def update_plot_data():
     """Refresh plotted data after file switch."""
-    global lines, ax
+    global lines, ax, channel_visibility
 
     for line in lines:
         line.remove()
@@ -244,87 +452,177 @@ def update_plot_data():
         line, = ax.plot([], [], label=c, linewidth=1)
         lines.append(line)
 
-    ax.legend(loc="upper right")
+    # By default keep only the first channel active after load/reload.
+    channel_visibility = [i == 0 for i in range(len(channels.columns))]
 
-    y_min = channels.min().min()
-    y_max = channels.max().max()
-    y_range = y_max - y_min
-    if y_range == 0:
-        y_range = 1
-    y_margin = y_range * 0.1
-    ax.set_ylim(y_min - y_margin, y_max + y_margin)
+    if callable(refresh_channel_controls_fn):
+        refresh_channel_controls_fn()
+    if callable(apply_channel_visibility_fn):
+        apply_channel_visibility_fn()
 
 
 def update_info_text():
     """Update informational labels."""
-    global info_text_obj, controls_text_obj, file_info_obj
+    global info_text_obj, file_info_obj, channel_visibility, window_percent_ref
 
-    if "info_text_obj" in globals():
-        info_text_obj.remove()
-    if "file_info_obj" in globals():
-        file_info_obj.remove()
+    visible_channels = 0
+    if channel_visibility and len(channel_visibility) == len(channels.columns):
+        visible_channels = sum(1 for is_visible in channel_visibility if is_visible)
+    else:
+        visible_channels = len(channels.columns)
+
+    window_percent = float(window_percent_ref[0])
 
     info_text = (
         f"Channels: {len(channels.columns)} | "
+        f"Visible: {visible_channels} | "
         f"Samples: {n} | "
         f"Duration: {time[-1] - time[0]:.3f}s | "
-        f"Zoom: {zoom_level[0]}%"
+        f"Window: {window_percent:.1f}%"
     )
-    info_text_obj = plt.figtext(0.05, 0.95, info_text, fontsize=10, ha="left")
+    if info_text_obj is None:
+        info_text_obj = plt.figtext(0.05, 0.957, info_text, fontsize=10, ha="left")
+    else:
+        info_text_obj.set_text(info_text)
 
-    file_info = f"File: {os.path.basename(FILE)}"
-    file_info_obj = plt.figtext(0.05, 0.98, file_info, fontsize=10, ha="left", weight="bold")
+    file_name = os.path.basename(FILE)
+    if len(file_name) > 64:
+        file_name = "..." + file_name[-61:]
+    file_info = f"File: {file_name}"
+    if file_info_obj is None:
+        file_info_obj = plt.figtext(
+            0.05, 0.985, file_info, fontsize=10, ha="left", weight="bold"
+        )
+    else:
+        file_info_obj.set_text(file_info)
+
+
+def set_status_text(message, color="dimgray", redraw=False):
+    """Update or create a small status text in the figure."""
+    global status_text_obj, fig
+
+    if "fig" not in globals():
+        return
+
+    if status_text_obj is None:
+        status_text_obj = plt.figtext(
+            0.99, 0.985, message, fontsize=10, ha="right", va="top", color=color
+        )
+    else:
+        status_text_obj.set_text(message)
+        status_text_obj.set_color(color)
+
+    if redraw and fig.canvas is not None:
+        fig.canvas.draw_idle()
+        plt.pause(0.001)
 
 
 # MAIN PROGRAM
 def main():
-    global FILE, df, time, channels, n, lines, ax, fig, update_zoom_fn, draw_frame_fn
+    global FILE, time, channels, n, lines, ax, fig, update_zoom_fn, draw_frame_fn, time_range_ref
+    global channel_visibility, channel_data_arrays, refresh_channel_controls_fn, apply_channel_visibility_fn
     global current_frame, is_playing, current_center, zoom_level
-    global info_text_obj, controls_text_obj, file_info_obj
+    global info_text_obj, file_info_obj, window_percent_ref
+    global clear_probe_fn
 
     FILE = select_file()
 
-    raw_df = read_lvm_file(FILE)
-    prepared = prepare_loaded_data(raw_df)
+    fig, ax = plt.subplots(figsize=(14, 8))
+    set_status_text("Loading file...", color="tab:orange", redraw=True)
+
+    prepared = load_prepared_data_from_cache(FILE)
+    if prepared is None:
+        raw_df = read_lvm_file(FILE)
+        set_status_text("Processing data...", color="tab:orange", redraw=True)
+        prepared = prepare_loaded_data(raw_df)
+        if prepared is not None:
+            set_status_text("Saving cache...", color="tab:orange", redraw=True)
+            save_prepared_data_to_cache(FILE, prepared)
+    else:
+        set_status_text("Loaded from cache", color="tab:green", redraw=True)
+
     if prepared is None:
         print("Failed to prepare data from file.")
+        set_status_text("Load failed", color="tab:red", redraw=True)
         sys.exit()
 
-    df, time, channels, n = prepared
+    _, time, channels, n = prepared
+    channel_data_arrays = [
+        channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
+    ]
     print(f"Loaded {len(channels.columns)} channels, {n} samples")
     print(f"Time range: {time[0]} - {time[-1]}")
 
-    fig, ax = plt.subplots(figsize=(14, 8))
     lines = [ax.plot([], [], label=c, linewidth=1)[0] for c in channels.columns]
+    channel_visibility = [i == 0 for i in range(len(channels.columns))]
+    channel_control = {"ax": None, "widget": None}
+    channel_index_by_label = {name: idx for idx, name in enumerate(channels.columns)}
 
     time_range = time[-1] - time[0]
     if time_range == 0:
         time_range = 1
+    time_range_ref[0] = time_range
 
     # Global playback state.
     current_frame = [0]
-    is_playing = [True]
+    is_playing = [False]
+    edge_anchor = ["none"]  # "left", "right", "none"
+    animation_enabled = [ANIMATION_DEFAULT_ENABLED]
+    x_axis_mode = ["freq"]  # "time" or "freq"
+    ani_ref = [None]
     slider_lock = [False]
+    last_slider_frame = [-1]
     window_size = [time_range * INITIAL_WINDOW_SIZE]
     zoom_level = [50]
+    # Allow deep zoom from Window input below 1% (e.g. 0.5%, 0.1%).
+    min_zoom_scale = 0.0001
+    max_zoom_scale = 1.0
+    zoom_exponent = 3.0
 
     # Initial window center.
     initial_center = time[0] + window_size[0] * 0.8
     current_center = [initial_center]
 
+    def zoom_to_scale_factor(zoom_value):
+        normalized_val = float(zoom_value) / 100.0
+        return min_zoom_scale + (max_zoom_scale - min_zoom_scale) * (
+            normalized_val ** zoom_exponent
+        )
+
+    def scale_factor_to_zoom(scale_factor):
+        clamped_scale = min(max_zoom_scale, max(min_zoom_scale, float(scale_factor)))
+        normalized = (clamped_scale - min_zoom_scale) / (max_zoom_scale - min_zoom_scale)
+        return 100.0 * (normalized ** (1.0 / zoom_exponent))
+
     def update_zoom(val):
         zoom_level[0] = val
-        min_zoom = 0.01
-        max_zoom = 1.0
-        exponent = 3.0
-        normalized_val = zoom_level[0] / 100.0
-        scale_factor = min_zoom + (max_zoom - min_zoom) * (normalized_val ** exponent)
-        window_size[0] = time_range * scale_factor
+        scale_factor = zoom_to_scale_factor(zoom_level[0])
+        window_size[0] = time_range_ref[0] * scale_factor
+        if time_range_ref[0] > 0:
+            window_percent_ref[0] = max(
+                0.0, min(100.0, (window_size[0] / time_range_ref[0]) * 100.0)
+            )
+        else:
+            window_percent_ref[0] = 0.0
         update_display_window()
         draw_frame()
 
-    def update_display_window():
+    def get_display_window_bounds():
+        if window_size[0] > time_range_ref[0]:
+            window_size[0] = time_range_ref[0]
         half_window = window_size[0] / 2
+
+        if edge_anchor[0] == "left":
+            window_start = time[0]
+            window_end = window_start + window_size[0]
+            current_center[0] = window_start + half_window
+            return window_start, window_end
+        if edge_anchor[0] == "right":
+            window_end = time[-1]
+            window_start = window_end - window_size[0]
+            current_center[0] = window_end - half_window
+            return window_start, window_end
+
         window_start = current_center[0] - half_window
         window_end = current_center[0] + half_window
 
@@ -337,7 +635,48 @@ def main():
             window_start = window_end - window_size[0]
             current_center[0] = window_end - half_window
 
-        ax.set_xlim(window_start, window_end)
+        return window_start, window_end
+
+    def get_display_window_indices():
+        window_start, window_end = get_display_window_bounds()
+        start_idx = max(0, np.searchsorted(time, window_start) - 10)
+        end_idx = min(n, np.searchsorted(time, window_end) + 10)
+        return start_idx, end_idx
+
+    def update_display_window():
+        window_start, window_end = get_display_window_bounds()
+        if x_axis_mode[0] == "time":
+            ax.set_xlim(window_start, window_end)
+
+    def seek_to_frame(target_frame, pause_playback=True):
+        if n <= 0:
+            return
+        if pause_playback:
+            is_playing[0] = False
+        edge_anchor[0] = "none"
+        current_frame[0] = int(min(max(0, target_frame), n - 1))
+        current_center[0] = time[current_frame[0]]
+        update_display_window()
+        draw_frame(force_ui_sync=True)
+
+    def shift_frame(delta):
+        seek_to_frame(current_frame[0] + int(delta), pause_playback=True)
+
+    def jump_to_start():
+        seek_to_frame(0, pause_playback=True)
+        if n > 0:
+            edge_anchor[0] = "left"
+            current_center[0] = time[0] + window_size[0] * 0.8
+            update_display_window()
+            draw_frame(force_ui_sync=True)
+
+    def jump_to_end():
+        seek_to_frame(n - 1, pause_playback=True)
+        if n > 0:
+            edge_anchor[0] = "right"
+            current_center[0] = time[-1] - window_size[0] * 0.5
+            update_display_window()
+            draw_frame(force_ui_sync=True)
 
     y_min = channels.min().min()
     y_max = channels.max().max()
@@ -347,36 +686,280 @@ def main():
     y_margin = y_range * 0.1
     ax.set_ylim(y_min - y_margin, y_max + y_margin)
 
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Value (V)")
-    ax.legend(loc="upper right")
+    if x_axis_mode[0] == "time":
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Value (V)")
+    else:
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("Amplitude")
     ax.grid(True, alpha=0.3)
-    plt.subplots_adjust(bottom=0.3)
+    plt.subplots_adjust(bottom=0.3, right=0.8, top=0.82)
 
-    def draw_frame():
+    last_ylim = [None]
+
+    def apply_dynamic_ylim(y_min, y_max):
+        if not np.isfinite(y_min) or not np.isfinite(y_max):
+            return
+        y_range = y_max - y_min
+        if y_range == 0:
+            # Flat signal: keep a small proportional margin around the value.
+            flat_margin = max(abs(y_min) * 0.01, 1e-9)
+            y_low = y_min - flat_margin
+            y_high = y_max + flat_margin
+        else:
+            y_margin = y_range * 0.1
+            y_low = y_min - y_margin
+            y_high = y_max + y_margin
+
+        prev_ylim = last_ylim[0]
+        if prev_ylim is not None:
+            if abs(prev_ylim[0] - y_low) < 1e-12 and abs(prev_ylim[1] - y_high) < 1e-12:
+                return
+
+        ax.set_ylim(y_low, y_high)
+        last_ylim[0] = (y_low, y_high)
+
+    def update_y_limits_for_visible_channels(start_idx=None, end_idx=None):
+        active_indices = [
+            i for i, is_visible in enumerate(channel_visibility) if is_visible
+        ]
+        if not active_indices:
+            return
+
+        use_window = (
+            start_idx is not None
+            and end_idx is not None
+            and 0 <= int(start_idx) < int(end_idx) <= n
+        )
+        y_min = np.inf
+        y_max = -np.inf
+        for idx in active_indices:
+            arr = channel_data_arrays[idx]
+            view = arr[start_idx:end_idx] if use_window else arr
+            if view.size == 0:
+                continue
+            local_min = np.nanmin(view)
+            local_max = np.nanmax(view)
+            if local_min < y_min:
+                y_min = local_min
+            if local_max > y_max:
+                y_max = local_max
+
+        apply_dynamic_ylim(y_min, y_max)
+
+    def apply_channel_visibility():
+        for idx, line in enumerate(lines):
+            is_visible = idx < len(channel_visibility) and channel_visibility[idx]
+            line.set_visible(is_visible)
+            if not is_visible:
+                line.set_data([], [])
+
+        visible_indices = [
+            idx for idx, is_visible in enumerate(channel_visibility) if is_visible
+        ]
+        if visible_indices:
+            ax.legend(
+                handles=[lines[idx] for idx in visible_indices],
+                labels=[channels.columns[idx] for idx in visible_indices],
+                loc="upper right",
+            )
+        else:
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.remove()
+
+        if x_axis_mode[0] == "time":
+            update_y_limits_for_visible_channels()
+
+    def rebuild_channel_controls():
+        if channel_control["ax"] is not None:
+            channel_control["ax"].remove()
+
+        labels = list(channels.columns)
+        channel_index_by_label.clear()
+        channel_index_by_label.update({name: idx for idx, name in enumerate(labels)})
+
+        panel_height = min(0.52, 0.04 * max(6, len(labels)))
+        panel_top = 0.82
+        channel_control["ax"] = plt.axes([0.81, panel_top - panel_height, 0.18, panel_height])
+        channel_control["ax"].set_title("Channels", fontsize=9)
+
+        channel_control["widget"] = CheckButtons(
+            channel_control["ax"], labels, channel_visibility
+        )
+
+        for text in channel_control["widget"].labels:
+            text.set_fontsize(8)
+
+        def on_channel_toggle(label):
+            idx = channel_index_by_label.get(label)
+            if idx is None:
+                return
+            channel_visibility[idx] = not channel_visibility[idx]
+            apply_channel_visibility()
+            draw_frame()
+            update_info_text()
+
+        channel_control["widget"].on_clicked(on_channel_toggle)
+
+    last_ui_sync_frame = [-UI_SYNC_FRAME_STRIDE]
+    freq_render_cache = {
+        "signature": None,
+        "freq_view": None,
+        "amp_by_channel": {},
+        "y_min": np.nan,
+        "y_max": np.nan,
+        "x_max": 0.0,
+    }
+
+    def draw_frame(force_ui_sync=False):
         if n == 0:
             return
 
-        start_idx = max(0, np.searchsorted(time, ax.get_xlim()[0]) - 10)
-        end_idx = min(n, np.searchsorted(time, ax.get_xlim()[1]) + 10)
+        start_idx, end_idx = get_display_window_indices()
+        span = max(0, end_idx - start_idx)
 
-        for i, c in enumerate(channels.columns):
-            lines[i].set_data(time[start_idx:end_idx], channels[c].iloc[start_idx:end_idx])
+        y_min = np.inf
+        y_max = -np.inf
 
-        if not slider_lock[0] and n > 1:
-            old_val = time_slider.val
-            new_val = current_frame[0] / (n - 1)
-            if abs(old_val - new_val) > 1e-6:
-                time_slider.eventson = False
-                time_slider.set_val(new_val)
-                time_slider.eventson = True
+        if x_axis_mode[0] == "time":
+            freq_render_cache["signature"] = None
+            step = max(1, span // MAX_RENDER_POINTS) if span > MAX_RENDER_POINTS else 1
+            time_view = time[start_idx:end_idx:step]
+
+            for i, _ in enumerate(channels.columns):
+                if i < len(channel_visibility) and channel_visibility[i]:
+                    y_view = channel_data_arrays[i][start_idx:end_idx:step]
+                    lines[i].set_data(time_view, y_view)
+                    if y_view.size:
+                        local_min = np.nanmin(y_view)
+                        local_max = np.nanmax(y_view)
+                        if np.isfinite(local_min) and local_min < y_min:
+                            y_min = local_min
+                        if np.isfinite(local_max) and local_max > y_max:
+                            y_max = local_max
+                else:
+                    lines[i].set_data([], [])
+        else:
+            if span < 4:
+                for line in lines:
+                    line.set_data([], [])
+                freq_render_cache["signature"] = None
+            else:
+                visible_indices = tuple(
+                    i for i, is_visible in enumerate(channel_visibility) if is_visible
+                )
+                signature = (start_idx, end_idx, visible_indices)
+
+                if signature != freq_render_cache["signature"]:
+                    if span > MAX_FFT_SAMPLES:
+                        sample_idx = np.linspace(
+                            start_idx, end_idx - 1, MAX_FFT_SAMPLES, dtype=int
+                        )
+                    else:
+                        sample_idx = np.arange(start_idx, end_idx, dtype=int)
+
+                    time_view = time[sample_idx]
+                    dt = np.diff(time_view)
+                    positive_dt = dt[dt > 0]
+                    if positive_dt.size == 0:
+                        for line in lines:
+                            line.set_data([], [])
+                        freq_render_cache["signature"] = None
+                        apply_dynamic_ylim(y_min, y_max)
+                        fig.canvas.draw_idle()
+                        return
+
+                    sample_dt = float(np.median(positive_dt))
+                    freq_template = np.fft.rfftfreq(time_view.size, d=sample_dt)
+                    if freq_template.size == 0:
+                        for line in lines:
+                            line.set_data([], [])
+                        freq_render_cache["signature"] = None
+                        apply_dynamic_ylim(y_min, y_max)
+                        fig.canvas.draw_idle()
+                        return
+
+                    f_step = (
+                        max(1, freq_template.size // MAX_RENDER_POINTS)
+                        if freq_template.size > MAX_RENDER_POINTS
+                        else 1
+                    )
+                    freq_view = freq_template[::f_step]
+                    amp_by_channel = {}
+                    cache_y_min = np.inf
+                    cache_y_max = -np.inf
+
+                    for i in visible_indices:
+                        y_raw = channel_data_arrays[i][sample_idx]
+                        finite_mask = np.isfinite(y_raw)
+                        if finite_mask.sum() < 4:
+                            continue
+                        mean_val = float(np.nanmean(y_raw[finite_mask]))
+                        y_clean = np.where(finite_mask, y_raw, mean_val)
+                        centered = y_clean - np.mean(y_clean)
+                        fft_vals = np.fft.rfft(centered)
+                        amp = (2.0 / centered.size) * np.abs(fft_vals)
+                        amp_view = amp[::f_step]
+                        amp_by_channel[i] = amp_view
+
+                        local_min = np.nanmin(amp_view) if amp_view.size else np.nan
+                        local_max = np.nanmax(amp_view) if amp_view.size else np.nan
+                        if np.isfinite(local_min) and local_min < cache_y_min:
+                            cache_y_min = local_min
+                        if np.isfinite(local_max) and local_max > cache_y_max:
+                            cache_y_max = local_max
+
+                    freq_render_cache["signature"] = signature
+                    freq_render_cache["freq_view"] = freq_view
+                    freq_render_cache["amp_by_channel"] = amp_by_channel
+                    freq_render_cache["y_min"] = cache_y_min
+                    freq_render_cache["y_max"] = cache_y_max
+                    freq_render_cache["x_max"] = 0.5 / sample_dt if sample_dt > 0 else 0.0
+
+                freq_view = freq_render_cache["freq_view"]
+                amp_by_channel = freq_render_cache["amp_by_channel"]
+                for i, _ in enumerate(channels.columns):
+                    if i in amp_by_channel:
+                        lines[i].set_data(freq_view, amp_by_channel[i])
+                    else:
+                        lines[i].set_data([], [])
+
+                y_min = freq_render_cache["y_min"]
+                y_max = freq_render_cache["y_max"]
+                if freq_render_cache["x_max"] > 0:
+                    ax.set_xlim(0.0, freq_render_cache["x_max"])
+
+        apply_dynamic_ylim(y_min, y_max)
+
+        should_sync_ui = force_ui_sync or (not is_playing[0]) or (
+            current_frame[0] - last_ui_sync_frame[0] >= UI_SYNC_FRAME_STRIDE
+        )
+        if should_sync_ui:
+            if not slider_lock[0] and n > 1:
+                old_val = time_slider.val
+                new_val = current_frame[0] / (n - 1)
+                if abs(old_val - new_val) > 1e-6:
+                    time_slider.eventson = False
+                    time_slider.set_val(new_val)
+                    time_slider.eventson = True
+            update_input_boxes()
+            update_info_text()
+            last_ui_sync_frame[0] = current_frame[0]
 
         fig.canvas.draw_idle()
 
+    refresh_channel_controls_fn = rebuild_channel_controls
+    apply_channel_visibility_fn = apply_channel_visibility
     update_zoom_fn = update_zoom
     draw_frame_fn = draw_frame
+    rebuild_channel_controls()
+    apply_channel_visibility()
 
     def update(_):
+        if not animation_enabled[0]:
+            return lines
+
         if is_playing[0] and current_frame[0] < n - 1:
             current_frame[0] += 1
 
@@ -414,19 +997,171 @@ def main():
     ax_stop = plt.axes([0.3, 0.18, 0.08, 0.06])
     ax_forw = plt.axes([0.4, 0.18, 0.08, 0.06])
     ax_open = plt.axes([0.5, 0.18, 0.08, 0.06])
+    ax_anim = plt.axes([0.6, 0.18, 0.12, 0.06])
+    ax_mode = plt.axes([0.73, 0.18, 0.10, 0.06])
+    ax_probe = plt.axes([0.84, 0.18, 0.14, 0.06])
 
     btn_back = Button(ax_back, "Back")
     btn_play = Button(ax_play, "Play")
     btn_stop = Button(ax_stop, "Pause")
     btn_forw = Button(ax_forw, "Forward")
     btn_open = Button(ax_open, "Open")
+    btn_anim = Button(ax_anim, "Anim: On")
+    btn_mode = Button(ax_mode, "X: Hz")
+    btn_probe = Button(ax_probe, "Probe: Off")
+
+    probe_enabled = [False]
+    probe_artist = {"point": None, "text": None}
+
+    def clear_probe():
+        if probe_artist["point"] is not None:
+            try:
+                probe_artist["point"].remove()
+            except Exception:
+                pass
+            probe_artist["point"] = None
+        if probe_artist["text"] is not None:
+            try:
+                probe_artist["text"].remove()
+            except Exception:
+                pass
+            probe_artist["text"] = None
+        fig.canvas.draw_idle()
+
+    def find_nearest_visible_point(x_target, y_target):
+        best = None
+        x_span = max(1e-12, abs(ax.get_xlim()[1] - ax.get_xlim()[0]))
+        y_span = max(1e-12, abs(ax.get_ylim()[1] - ax.get_ylim()[0]))
+        for idx, line in enumerate(lines):
+            if not (idx < len(channel_visibility) and channel_visibility[idx]):
+                continue
+            x_data, y_data = line.get_data()
+            x_data = np.asarray(x_data, dtype=float)
+            y_data = np.asarray(y_data, dtype=float)
+            if len(x_data) == 0:
+                continue
+            dx = (x_data - x_target) / x_span
+            dy = (y_data - y_target) / y_span
+            dist2 = dx * dx + dy * dy
+            nearest_i = int(np.argmin(dist2))
+            score = float(dist2[nearest_i])
+            if best is None or score < best["score"]:
+                best = {
+                    "score": score,
+                    "x": float(x_data[nearest_i]),
+                    "y": float(y_data[nearest_i]),
+                    "channel": channels.columns[idx],
+                }
+        return best
+
+    def render_probe(hit):
+        clear_probe()
+        if hit is None:
+            set_status_text("No visible point found", color="tab:orange", redraw=False)
+            return
+
+        point_artist, = ax.plot(
+            [hit["x"]], [hit["y"]], marker="o", markersize=6, color="black", zorder=9
+        )
+        probe_artist["point"] = point_artist
+
+        if x_axis_mode[0] == "time":
+            x_line = f"Time={hit['x']:.9g} s"
+        else:
+            x_line = f"Freq={hit['x']:.9g} Hz"
+        info = f"{hit['channel']}\n{x_line}\nValue={hit['y']:.9g}"
+        probe_artist["text"] = ax.text(
+            hit["x"],
+            hit["y"],
+            info,
+            fontsize=8,
+            ha="left",
+            va="bottom",
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+            zorder=10,
+        )
+        set_status_text("Point probed", color="tab:green", redraw=False)
+        fig.canvas.draw_idle()
+
+    def on_probe_click(event):
+        if not probe_enabled[0]:
+            return
+        if event.inaxes != ax:
+            return
+        if event.button == 3:
+            clear_probe()
+            set_status_text("Probe cleared", color="tab:green", redraw=False)
+            return
+        if event.button != 1 or event.xdata is None or event.ydata is None:
+            return
+
+        hit = find_nearest_visible_point(float(event.xdata), float(event.ydata))
+        render_probe(hit)
+
+    def set_probe_enabled(enabled):
+        probe_enabled[0] = bool(enabled)
+        btn_probe.label.set_text("Probe: On" if enabled else "Probe: Off")
+        if not enabled:
+            clear_probe()
+            set_status_text("Probe disabled", color="tab:orange", redraw=False)
+        else:
+            set_status_text(
+                "Probe enabled: Left click point, Right click to clear",
+                color="tab:green",
+                redraw=False,
+            )
+        fig.canvas.draw_idle()
+
+    def toggle_probe(event=None):
+        set_probe_enabled(not probe_enabled[0])
+
+    def set_animation_enabled(enabled):
+        animation_enabled[0] = bool(enabled)
+        if animation_enabled[0]:
+            btn_anim.label.set_text("Anim: On")
+            if ani_ref[0] is not None:
+                ani_ref[0].event_source.start()
+            set_status_text("Animation enabled", color="tab:green", redraw=False)
+        else:
+            is_playing[0] = False
+            btn_anim.label.set_text("Anim: Off")
+            if ani_ref[0] is not None:
+                ani_ref[0].event_source.stop()
+            set_status_text("Animation disabled", color="tab:orange", redraw=False)
+        fig.canvas.draw_idle()
+
+    def set_axis_mode(mode):
+        normalized = "freq" if str(mode).lower().startswith("f") else "time"
+        if x_axis_mode[0] == normalized:
+            return
+        clear_probe()
+        x_axis_mode[0] = normalized
+        if normalized == "time":
+            btn_mode.label.set_text("X: Time")
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Value (V)")
+            set_status_text("Time mode", color="tab:green", redraw=False)
+            update_display_window()
+        else:
+            btn_mode.label.set_text("X: Hz")
+            ax.set_xlabel("Frequency (Hz)")
+            ax.set_ylabel("Amplitude")
+            set_status_text("Frequency mode (Hz)", color="tab:green", redraw=False)
+        draw_frame(force_ui_sync=True)
+
+    def toggle_axis_mode(event=None):
+        if x_axis_mode[0] == "time":
+            set_axis_mode("freq")
+        else:
+            set_axis_mode("time")
 
     def play(event):
+        if not animation_enabled[0]:
+            set_status_text("Enable animation first", color="tab:orange", redraw=False)
+            return
         if current_frame[0] >= n - 1:
-            current_frame[0] = 0
-            current_center[0] = time[0] + window_size[0] * 0.8
-            update_display_window()
-            draw_frame()
+            jump_to_start()
+        edge_anchor[0] = "none"
         is_playing[0] = True
         print("Playback")
 
@@ -435,44 +1170,79 @@ def main():
         print("Paused")
 
     def rewind(event):
-        is_playing[0] = False
-        current_frame[0] = max(0, current_frame[0] - STEP)
-        if current_frame[0] < n:
-            current_time = time[current_frame[0]]
-            current_center[0] = current_time + window_size[0] * 0.3
-            update_display_window()
-        draw_frame()
+        shift_frame(-STEP)
         print(f"Step back: frame {current_frame[0]}")
 
     def forward(event):
-        is_playing[0] = False
-        current_frame[0] = min(n - 1, current_frame[0] + STEP)
-        if current_frame[0] < n:
-            current_time = time[current_frame[0]]
-            current_center[0] = current_time + window_size[0] * 0.3
-            update_display_window()
-        draw_frame()
+        shift_frame(STEP)
         print(f"Step forward: frame {current_frame[0]}")
+
+    def toggle_animation(event=None):
+        set_animation_enabled(not animation_enabled[0])
 
     btn_play.on_clicked(play)
     btn_stop.on_clicked(stop)
     btn_back.on_clicked(rewind)
     btn_forw.on_clicked(forward)
     btn_open.on_clicked(reload_with_new_file)
+    btn_anim.on_clicked(toggle_animation)
+    btn_mode.on_clicked(toggle_axis_mode)
+    btn_probe.on_clicked(toggle_probe)
+    clear_probe_fn = clear_probe
 
     # Time slider.
     ax_time_slider = plt.axes([0.1, 0.12, 0.7, 0.03])
-    time_slider = Slider(ax_time_slider, "Time", 0.0, 1.0, valinit=0.0)
+    try:
+        time_slider = Slider(
+            ax_time_slider, "Timeline", 0.0, 1.0, valinit=0.0, dragging=False
+        )
+    except TypeError:
+        time_slider = Slider(ax_time_slider, "Timeline", 0.0, 1.0, valinit=0.0)
+    time_slider.valtext.set_visible(False)
 
     def on_time_slider(val):
-        if is_playing[0] or n <= 1:
+        if n <= 1:
             return
+        if float(val) <= 1e-6:
+            new_anchor = "left"
+        elif float(val) >= 1.0 - 1e-6:
+            new_anchor = "right"
+        else:
+            new_anchor = "none"
+
+        # Manual timeline interaction should always work and pause playback.
+        if is_playing[0]:
+            is_playing[0] = False
+        target_frame = int(round(val * (n - 1)))
+        anchor_changed = edge_anchor[0] != new_anchor
+        if (
+            target_frame == current_frame[0]
+            and target_frame == last_slider_frame[0]
+            and not anchor_changed
+        ):
+            return
+        edge_anchor[0] = new_anchor
+        last_slider_frame[0] = target_frame
         slider_lock[0] = True
-        current_frame[0] = int(val * (n - 1))
+        current_frame[0] = target_frame
         if current_frame[0] < n:
-            current_time = time[current_frame[0]]
-            current_center[0] = current_time + window_size[0] * 0.3
-            update_display_window()
+            # Map timeline slider position directly to visible window position.
+            # This prevents dead zones where dragging the slider appears to do nothing.
+            available_range = max(0.0, (time[-1] - time[0]) - window_size[0])
+            if available_range > 1e-12:
+                if edge_anchor[0] == "left":
+                    window_start = time[0]
+                elif edge_anchor[0] == "right":
+                    window_start = time[-1] - window_size[0]
+                else:
+                    window_start = time[0] + float(val) * available_range
+                window_end = window_start + window_size[0]
+                if x_axis_mode[0] == "time":
+                    ax.set_xlim(window_start, window_end)
+                current_center[0] = (window_start + window_end) * 0.5
+            else:
+                current_center[0] = time[current_frame[0]]
+                update_display_window()
             draw_frame()
         slider_lock[0] = False
 
@@ -480,50 +1250,114 @@ def main():
 
     # Zoom slider.
     ax_zoom_slider = plt.axes([0.1, 0.06, 0.7, 0.03])
-    zoom_slider = Slider(ax_zoom_slider, "Zoom", 1, 100, valinit=50, valfmt="%d%%")
+    zoom_slider = Slider(ax_zoom_slider, "Detail", 1, 100, valinit=50, valfmt="%d")
+    zoom_slider.valtext.set_visible(False)
     zoom_slider.on_changed(update_zoom)
+
+    # Direct timeline/zoom inputs (apply with Enter).
+    text_input_lock = [False]
+    last_time_box_value = [None]
+    last_zoom_box_value = [None]
+
+    ax_time_input = plt.axes([0.83, 0.12, 0.15, 0.04])
+    ax_zoom_input = plt.axes([0.83, 0.06, 0.15, 0.04])
+    time_input = TextBox(ax_time_input, "", initial="0.0")
+    zoom_input = TextBox(ax_zoom_input, "", initial="20.0")
+    ax_time_input.set_title("Position (%)", fontsize=8, pad=1, loc="left")
+    ax_zoom_input.set_title("Window (%)", fontsize=8, pad=1, loc="left")
+
+    def set_time_input_value(value):
+        if n <= 1:
+            position_percent = 0.0
+        else:
+            position_percent = float(value) / (n - 1) * 100.0
+        rounded = round(position_percent, 3)
+        if last_time_box_value[0] == rounded:
+            return
+        text_input_lock[0] = True
+        time_input.set_val(f"{rounded:.3f}")
+        text_input_lock[0] = False
+        last_time_box_value[0] = rounded
+
+    def set_zoom_input_value(value):
+        if time_range_ref[0] > 0:
+            window_percent = (window_size[0] / time_range_ref[0]) * 100.0
+        else:
+            window_percent = 0.0
+        rounded = round(window_percent, 2)
+        if last_zoom_box_value[0] == rounded:
+            return
+        text_input_lock[0] = True
+        zoom_input.set_val(f"{rounded:.2f}")
+        text_input_lock[0] = False
+        last_zoom_box_value[0] = rounded
+
+    def update_input_boxes():
+        if 0 <= current_frame[0] < n:
+            set_time_input_value(current_frame[0])
+        set_zoom_input_value(zoom_level[0])
+
+    def on_time_input_submit(text):
+        if text_input_lock[0] or n <= 1:
+            return
+        candidate = text.strip().replace(",", ".")
+        try:
+            target_position_percent = float(candidate)
+        except ValueError:
+            set_status_text("Invalid position value", color="tab:red", redraw=True)
+            update_input_boxes()
+            return
+
+        target_position_percent = min(100.0, max(0.0, target_position_percent))
+        time_slider.set_val(target_position_percent / 100.0)
+        update_input_boxes()
+        set_status_text("Ready", color="tab:green", redraw=False)
+
+    def on_zoom_input_submit(text):
+        if text_input_lock[0]:
+            return
+        candidate = text.strip().replace(",", ".")
+        try:
+            target_window_percent = float(candidate)
+        except ValueError:
+            set_status_text("Invalid window value", color="tab:red", redraw=True)
+            update_input_boxes()
+            return
+
+        target_window_percent = min(100.0, max(min_zoom_scale * 100.0, target_window_percent))
+        target_zoom = scale_factor_to_zoom(target_window_percent / 100.0)
+        zoom_slider.set_val(target_zoom)
+        update_input_boxes()
+        set_status_text("Ready", color="tab:green", redraw=False)
+
+    time_input.on_submit(on_time_input_submit)
+    zoom_input.on_submit(on_zoom_input_submit)
 
     # Keyboard handling.
     def on_key_press(event):
+        # Do not trigger global hotkeys while user edits timeline/zoom inputs.
+        if event.inaxes in (ax_time_input, ax_zoom_input):
+            return
+
         if event.key == " ":
+            if not animation_enabled[0]:
+                set_status_text("Enable animation first", color="tab:orange", redraw=False)
+                return
             if current_frame[0] >= n - 1:
-                current_frame[0] = 0
-                current_center[0] = time[0] + window_size[0] * 0.8
-                update_display_window()
-                draw_frame()
+                jump_to_start()
             is_playing[0] = not is_playing[0]
             print("Playback" if is_playing[0] else "Paused")
         elif event.key == "left":
-            is_playing[0] = False
-            current_frame[0] = max(0, current_frame[0] - STEP)
-            if current_frame[0] < n:
-                current_time = time[current_frame[0]]
-                current_center[0] = current_time + window_size[0] * 0.3
-                update_display_window()
-            draw_frame()
+            shift_frame(-STEP)
             print(f"Step back: frame {current_frame[0]}")
         elif event.key == "right":
-            is_playing[0] = False
-            current_frame[0] = min(n - 1, current_frame[0] + STEP)
-            if current_frame[0] < n:
-                current_time = time[current_frame[0]]
-                current_center[0] = current_time + window_size[0] * 0.3
-                update_display_window()
-            draw_frame()
+            shift_frame(STEP)
             print(f"Step forward: frame {current_frame[0]}")
         elif event.key == "home":
-            is_playing[0] = False
-            current_frame[0] = 0
-            current_center[0] = time[0] + window_size[0] * 0.8
-            update_display_window()
-            draw_frame()
+            jump_to_start()
             print("Jumped to start")
         elif event.key == "end":
-            is_playing[0] = False
-            current_frame[0] = n - 1
-            current_center[0] = time[-1] - window_size[0] * 0.5
-            update_display_window()
-            draw_frame()
+            jump_to_end()
             print("Jumped to end")
         elif event.key == "up":
             new_zoom = min(100, zoom_level[0] + 5)
@@ -531,22 +1365,38 @@ def main():
         elif event.key == "down":
             new_zoom = max(1, zoom_level[0] - 5)
             zoom_slider.set_val(new_zoom)
+        elif event.key == "a":
+            toggle_animation()
+        elif event.key == "m":
+            toggle_axis_mode()
+        elif event.key == "v":
+            toggle_probe()
+        elif event.key == "escape":
+            clear_probe()
         elif event.key in ("ctrl+o", "cmd+o"):
             reload_with_new_file()
 
+    fig.canvas.mpl_connect("button_press_event", on_probe_click)
     fig.canvas.mpl_connect("key_press_event", on_key_press)
 
     # Data and control info.
     update_info_text()
-    controls_text = (
-        "Controls: Space - pause/play, Left/Right - seek, Up/Down - zoom, "
-        "Home/End - start/end, Ctrl+O/Cmd+O - open file"
+    controls_text = "\n".join(
+        [
+            "Controls: Space - pause/play, Left/Right - seek, Up/Down - detail, Home/End - start/end",
+            "A - animation on/off, M - time/Hz mode, V - probe on/off, Esc - clear probe",
+            "Ctrl+O/Cmd+O - open file, Channels panel - toggle visibility, Position/Window - Enter",
+        ]
     )
-    controls_text_obj = plt.figtext(0.05, 0.92, controls_text, fontsize=9, ha="left", style="italic")
+    plt.figtext(0.05, 0.915, controls_text, fontsize=8.2, ha="left", style="italic")
 
-    ani = FuncAnimation(fig, update, interval=1000 / FPS, blit=False, cache_frame_data=False)
+    ani_ref[0] = FuncAnimation(
+        fig, update, interval=1000 / FPS, blit=False, cache_frame_data=False
+    )
+    set_animation_enabled(ANIMATION_DEFAULT_ENABLED)
     update_zoom(50)
     draw_frame()
+    set_status_text("Ready", color="tab:green", redraw=True)
 
     plt.gcf().canvas.manager.set_window_title(f"LVM Data Viewer - {os.path.basename(FILE)}")
     plt.show()

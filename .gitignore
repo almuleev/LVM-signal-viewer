@@ -20,6 +20,9 @@ env/
 coverage.xml
 htmlcov/
 
+# Local LVM viewer cache
+*.lvmcache.npz
+
 # Packaging artifacts
 build/
 dist/
