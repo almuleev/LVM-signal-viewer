@@ -6,7 +6,31 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
-- No changes yet.
+### Added
+
+- Optional CLI startup file argument: `python lvm_viewer.py <path_to_lvm_or_txt>`.
+- Export current plot as PNG (`Save PNG` button, `Ctrl+S`/`Cmd+S`).
+- Export current visible data range as CSV (`Save CSV` button, `Ctrl+E`/`Cmd+E`).
+- Basic parser tests and GitHub Actions test workflow.
+- Added Russian README translation.
+- New documentation set:
+  - `docs/build.md`
+  - `docs/github-topics.md`
+  - `docs/release-checklist.md`
+  - `docs/promotion.md`
+
+### Changed
+
+- Project README rewritten as a product-style page with download-first structure.
+- Empty-mode startup screen improved with clearer actions and shortcuts.
+- User-facing naming aligned to `LVM Signal Viewer` in window titles and docs.
+- Default visualization mode set to `Time` for safer first-use behavior.
+
+### Fixed
+
+- Main control buttons could become unresponsive in some non-blocking backend flows (widget references are now retained explicitly).
+- Startup/load flow now returns to empty mode on file/range errors instead of hard exit.
+- Friendlier parser message when numeric data is not detected.
 
 ## [0.8.6] - 2026-05-04
 

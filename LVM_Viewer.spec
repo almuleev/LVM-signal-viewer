@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='LVM_Viewer',
+    name='LVM_Signal_Viewer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -40,11 +40,11 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='LVM_Viewer',
+    name='LVM_Signal_Viewer',
 )
 app = BUNDLE(
     coll,
-    name='LVM_Viewer.app',
+    name='LVM_Signal_Viewer.app',
     icon=None,
     bundle_identifier=None,
 )

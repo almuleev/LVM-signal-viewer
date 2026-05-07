@@ -37,12 +37,33 @@ Run:
 python lvm_viewer.py
 ```
 
+Optional startup file:
+
+```bash
+python lvm_viewer.py path\to\file.lvm
+```
+
+## Validation Before PR
+
+Run:
+
+```bash
+python -m compileall .
+```
+
+If tests are available in your environment:
+
+```bash
+pytest
+```
+
 ## Pull Requests
 
 - Keep changes focused and small.
 - Update docs when behavior changes.
 - Do not claim support for data formats that are not implemented.
 - Include a short validation note in your PR description (what you tested).
+- Do not commit generated build outputs (`build/`, `dist/`, `__pycache__/`).
 
 ## Reporting Bugs
 
@@ -58,3 +79,4 @@ Please include:
 
 - Prefer readable, straightforward Python.
 - Avoid adding heavy dependencies unless clearly necessary.
+- Keep user-facing naming consistent: `LVM Signal Viewer`.

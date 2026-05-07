@@ -1,34 +1,55 @@
-# LVM-signal-viewer
+# LVM Signal Viewer
 
-Simple desktop app to open, plot, and inspect LabVIEW .lvm measurement files without writing scripts.
+[Русская версия](README.ru.md)
 
-## Motivation
+Fast desktop viewer for LabVIEW measurements: open a file, inspect signals, and export results in seconds.
 
-Large LVM exports are often hard to inspect quickly in spreadsheets. This tool is focused on practical day-to-day analysis: open a file, navigate signals, switch between time and frequency views, and probe exact values from visible traces.
+## Download
 
-## Features
+- Windows executable: [Latest Release](https://github.com/almuleev/LVM-signal-viewer/releases/latest)
+- All release assets: [Releases](https://github.com/almuleev/LVM-signal-viewer/releases)
+- Source install: clone this repository and run from Python.
 
-- Open `.lvm` and `.txt` files from a file dialog.
-- Parse numeric sections from multi-header LVM exports.
-- Auto-drop pseudo-channels that duplicate the time axis.
-- Monotonic time reconstruction for sectioned (`Multi_Headings`) files.
-- Interactive channel visibility panel (default: first channel enabled).
-- Pre-processing time-range selection (`From` / `To`) before rendering.
-- Timeline navigation with `Timeline` slider, `Position (%)` and `Window (%)` inputs, and playback controls (`Play`, `Pause`, `Back`, `Forward`).
-- Optional animation on/off toggle for performance (`Anim: On/Off`).
-- Performance profiles (`Fast`, `Balanced`, `Quality`) for weaker/stronger machines.
-- Dual X-axis mode: `X: Time` (seconds) and `X: Hz` (FFT spectrum for current visible window).
-- Point probe tool (`Probe`) to click and read exact values.
-- Local app cache (`.lvmcache.npz`) in the OS cache directory for faster reopen.
+## Screenshot / GIF
 
-## Installation
+Screenshot/GIF placeholder:
+- add a real screenshot to `docs/assets/screenshot.png`
+- or add a short demo GIF to `docs/assets/demo.gif`
+- then replace this section with Markdown image links
 
-### Requirements
+## Supported Formats
 
-- Python 3.10+
-- Desktop environment with GUI support (Tkinter + Matplotlib backend)
+- `.lvm` (LabVIEW Measurement)
+- `.txt` (tab-separated numeric text)
 
-### Setup
+Not supported as input right now:
+- `.csv`
+- `.xlsx` / `.xls`
+
+CSV export is supported for the currently visible data range.
+
+## Key Features
+
+- Empty-start mode with clear `Open file` entry point.
+- Handles multi-header LVM files and non-monotonic sectioned time.
+- Channel visibility panel with live legend updates.
+- Timeline + zoom sliders with numeric `Position (%)` and `Window (%)` inputs.
+- Time mode and FFT-based Hz mode.
+- Point probe tool for exact values on visible traces.
+- Performance profiles (`Fast`, `Balanced`, `Quality`) for weak/strong machines.
+- Export current view as PNG.
+- Export current visible data range as CSV.
+- Local prepared-data cache for faster reopen.
+
+## Quick Start
+
+### Option A: Download and run (Windows)
+
+1. Go to [Latest Release](https://github.com/almuleev/LVM-signal-viewer/releases/latest).
+2. Download the Windows artifact.
+3. Run `LVM_Signal_Viewer.exe`.
+
+### Option B: Run from source
 
 ```bash
 python -m venv .venv
@@ -46,53 +67,56 @@ macOS/Linux:
 source .venv/bin/activate
 ```
 
-Install dependencies:
+Install dependencies and start:
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Usage
-
-Run:
-
-```bash
 python lvm_viewer.py
 ```
 
-Select an input file in the dialog. The viewer opens paused by default.
+Optional startup file:
 
-Keyboard shortcuts:
+```bash
+python lvm_viewer.py path\to\file.lvm
+```
 
-- `Space`: play/pause
-- `Left` / `Right`: step back/forward
-- `Home` / `End`: jump to start/end
-- `Up` / `Down`: change detail
-- `A`: animation on/off
-- `M`: switch `Time/Hz` mode
-- `V`: probe on/off
-- `Esc`: clear probe marker
-- `Ctrl+O` / `Cmd+O`: open another file
+## Controls
+
+- Playback: `Space`, `Left/Right`, `Home/End`
+- Zoom/detail: `Up/Down`, `Detail` slider, `Window (%)`
+- Position: `Timeline` slider, `Position (%)`
+- Modes: `A` for animation on/off, `M` for Time/Hz, `V` for Probe, `P` for performance profile
+- File: `Open file` button or `Ctrl+O` / `Cmd+O`
+- Export: `Save PNG` button or `Ctrl+S`; `Save CSV` button or `Ctrl+E`
+- Probe: left click to place, right click or `Esc` to clear
 
 ## Limitations
 
-- Desktop GUI tool only (no CLI batch mode).
-- Expects tab-separated numeric data with time in first numeric column.
-- Very large files still require noticeable first parse time before cache exists.
-- FFT view is window-based and intended for quick inspection, not full spectral diagnostics.
-- No automated test suite yet.
+- Desktop GUI app only (Tkinter + Matplotlib).
+- Input parser expects tab-separated numeric columns with time in the first numeric column.
+- Large files still need noticeable first parse before cache is created.
+- FFT view is for quick inspection, not laboratory-grade spectral analysis.
+- No Excel/CSV input parser yet.
 
-## Possible Future Improvements
+## Roadmap
 
-- Optional CLI file path input (`python lvm_viewer.py <file>`).
-- Export visible range/channels to CSV.
-- Optional presets for FFT windowing/averaging.
-- Automated parser and UI smoke tests.
+- Add optional CSV input support with delimiter detection.
+- Add optional Excel input support after parser design and validation.
+- Add more parser edge-case tests and UI smoke tests.
+- Add signed Windows release pipeline.
+- Add user guide screenshots/GIF in `docs/assets/`.
+
+## Documentation
+
+- Build and packaging: [docs/build.md](docs/build.md)
+- Suggested GitHub topics: [docs/github-topics.md](docs/github-topics.md)
+- Release process: [docs/release-checklist.md](docs/release-checklist.md)
+- Promotion ideas: [docs/promotion.md](docs/promotion.md)
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
 MIT License. See [LICENSE](LICENSE).
-
-## Maintenance Notice
-
-This project is provided as an open-source tool. Issues, suggestions, and pull requests are welcome, but active maintenance and feature development are not guaranteed.

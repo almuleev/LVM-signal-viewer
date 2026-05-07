@@ -71,10 +71,10 @@ def select_file(exit_on_cancel=True):
     root.attributes("-topmost", True)  # Keep dialog above other windows
 
     file_path = filedialog.askopenfilename(
-        title="Select .lvm or .txt file to analyze",
+        title="Select .lvm or tab-separated .txt data file",
         filetypes=[
             ("LVM files", "*.lvm"),
-            ("Text files", "*.txt"),
+            ("Tab-separated text files", "*.txt"),
             ("All files", "*.*"),
         ],
     )
@@ -88,6 +88,52 @@ def select_file(exit_on_cancel=True):
         return None
 
     return file_path
+
+
+def select_export_path(title, default_name, filetypes):
+    """Open save-file dialog and return selected path or None."""
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    default_ext = str(filetypes[0][1]) if filetypes else ""
+    default_ext = default_ext.replace("*", "")
+    if default_ext and not default_ext.startswith("."):
+        default_ext = f".{default_ext}"
+    try:
+        selected_path = filedialog.asksaveasfilename(
+            title=title,
+            initialfile=default_name,
+            defaultextension=default_ext,
+            filetypes=filetypes,
+        )
+    finally:
+        root.destroy()
+    return selected_path or None
+
+
+def parse_cli_file_argument(argv):
+    """Parse optional startup file path from CLI arguments."""
+    if len(argv) <= 1:
+        return None, None
+
+    arg = str(argv[1]).strip()
+    if arg in ("-h", "--help"):
+        print("LVM Signal Viewer")
+        print("Usage: python lvm_viewer.py [path_to_lvm_or_txt]")
+        return None, "help"
+
+    candidate = os.path.abspath(arg)
+    if not os.path.isfile(candidate):
+        return None, f"Startup file not found: {candidate}"
+
+    ext = os.path.splitext(candidate)[1].lower()
+    if ext not in (".lvm", ".txt"):
+        return None, (
+            "Unsupported startup file extension. "
+            "Use .lvm or tab-separated .txt."
+        )
+
+    return candidate, None
 
 
 def select_processing_range(time_values):
@@ -322,7 +368,10 @@ def read_lvm_file(file_path):
     print(f"Collected {row_count} data rows")
 
     if row_count == 0 or not columns:
-        print("No numeric data found")
+        print(
+            "No numeric data found. Expected time + numeric channel columns in "
+            "a .lvm or tab-separated .txt file."
+        )
         return pd.DataFrame()
 
     # Build DataFrame from the assembled columns.
@@ -820,12 +869,12 @@ def show_empty_viewer(message=None):
         "widgets": [btn_open, btn_sample, btn_exit],
         "axes": [ax_empty, ax_open, ax_sample, ax_exit],
     }
-    plt.gcf().canvas.manager.set_window_title("LVM Data Viewer - No file")
+    plt.gcf().canvas.manager.set_window_title("LVM Signal Viewer - No file")
     plt.show()
 
 
 # MAIN PROGRAM
-def main(initial_file=None):
+def main(initial_file=None, empty_message=None):
     global FILE, time, channels, n, lines, ax, fig, update_zoom_fn, draw_frame_fn, time_range_ref
     global channel_visibility, channel_data_arrays, refresh_channel_controls_fn, apply_channel_visibility_fn
     global current_frame, is_playing, current_center, zoom_level
@@ -835,7 +884,7 @@ def main(initial_file=None):
     FILE = initial_file
     if not FILE:
         print("Started in empty mode.")
-        show_empty_viewer()
+        show_empty_viewer(empty_message)
         return
 
     fig, ax = plt.subplots(figsize=(14, 8))
@@ -1381,6 +1430,8 @@ def main(initial_file=None):
     ax_anim = plt.axes([0.6, 0.18, 0.12, 0.06])
     ax_mode = plt.axes([0.73, 0.18, 0.11, 0.06])
     ax_probe = plt.axes([0.85, 0.18, 0.13, 0.06])
+    ax_png = plt.axes([0.59, 0.24, 0.11, 0.05])
+    ax_csv = plt.axes([0.71, 0.24, 0.11, 0.05])
     ax_perf = plt.axes([0.85, 0.24, 0.13, 0.05])
 
     btn_back = Button(ax_back, "Step -")
@@ -1391,6 +1442,8 @@ def main(initial_file=None):
     btn_anim = Button(ax_anim, "Anim: On")
     btn_mode = Button(ax_mode, "Mode: Time")
     btn_probe = Button(ax_probe, "Probe: Off")
+    btn_png = Button(ax_png, "Save PNG")
+    btn_csv = Button(ax_csv, "Save CSV")
     btn_perf = Button(ax_perf, "Perf: Bal")
 
     probe_enabled = [False]
@@ -1599,6 +1652,75 @@ def main(initial_file=None):
     def toggle_animation(event=None):
         set_animation_enabled(not animation_enabled[0])
 
+    def export_plot_png(event=None):
+        if "fig" not in globals() or fig is None:
+            return
+        base_name = os.path.splitext(os.path.basename(FILE))[0] if FILE else "plot"
+        mode_suffix = "time" if x_axis_mode[0] == "time" else "hz"
+        default_name = f"{base_name}_{mode_suffix}.png"
+        export_path = select_export_path(
+            title="Export plot to PNG",
+            default_name=default_name,
+            filetypes=[("PNG image", "*.png")],
+        )
+        if not export_path:
+            set_status_text("PNG export canceled", color="tab:orange", redraw=True)
+            return
+        try:
+            fig.savefig(export_path, dpi=160, bbox_inches="tight")
+            set_status_text(
+                f"Plot exported: {os.path.basename(export_path)}",
+                color="tab:green",
+                redraw=True,
+            )
+        except Exception as e:
+            set_status_text(f"PNG export failed: {e}", color="tab:red", redraw=True)
+
+    def export_visible_range_csv(event=None):
+        if n <= 0:
+            set_status_text("No data to export", color="tab:orange", redraw=True)
+            return
+        start_idx, end_idx = get_display_window_indices()
+        if end_idx <= start_idx:
+            set_status_text("Visible range is empty", color="tab:orange", redraw=True)
+            return
+
+        visible_indices = [
+            idx for idx, is_visible in enumerate(channel_visibility) if is_visible
+        ]
+        if not visible_indices:
+            visible_indices = list(range(len(channels.columns)))
+            set_status_text(
+                "No visible channels selected; exporting all channels",
+                color="tab:orange",
+                redraw=True,
+            )
+
+        export_data = {"Time": time[start_idx:end_idx]}
+        for idx in visible_indices:
+            export_data[str(channels.columns[idx])] = channel_data_arrays[idx][start_idx:end_idx]
+        export_df = pd.DataFrame(export_data)
+
+        base_name = os.path.splitext(os.path.basename(FILE))[0] if FILE else "data"
+        default_name = f"{base_name}_visible_range.csv"
+        export_path = select_export_path(
+            title="Export visible range to CSV",
+            default_name=default_name,
+            filetypes=[("CSV file", "*.csv"), ("All files", "*.*")],
+        )
+        if not export_path:
+            set_status_text("CSV export canceled", color="tab:orange", redraw=True)
+            return
+        try:
+            export_df.to_csv(export_path, index=False)
+            set_status_text(
+                f"CSV exported: {os.path.basename(export_path)}",
+                color="tab:green",
+                redraw=True,
+            )
+        except Exception as e:
+            set_status_text(f"CSV export failed: {e}", color="tab:red", redraw=True)
+
     btn_play.on_clicked(play)
     btn_stop.on_clicked(stop)
     btn_back.on_clicked(rewind)
@@ -1607,13 +1729,39 @@ def main(initial_file=None):
     btn_anim.on_clicked(toggle_animation)
     btn_mode.on_clicked(toggle_axis_mode)
     btn_probe.on_clicked(toggle_probe)
+    btn_png.on_clicked(export_plot_png)
+    btn_csv.on_clicked(export_visible_range_csv)
     btn_perf.on_clicked(cycle_performance_profile)
     clear_probe_fn = clear_probe
     active_ui_refs["widgets"].extend(
-        [btn_back, btn_play, btn_stop, btn_forw, btn_open, btn_anim, btn_mode, btn_probe, btn_perf]
+        [
+            btn_back,
+            btn_play,
+            btn_stop,
+            btn_forw,
+            btn_open,
+            btn_anim,
+            btn_mode,
+            btn_probe,
+            btn_png,
+            btn_csv,
+            btn_perf,
+        ]
     )
     active_ui_refs["axes"].extend(
-        [ax_back, ax_play, ax_stop, ax_forw, ax_open, ax_anim, ax_mode, ax_probe, ax_perf]
+        [
+            ax_back,
+            ax_play,
+            ax_stop,
+            ax_forw,
+            ax_open,
+            ax_anim,
+            ax_mode,
+            ax_probe,
+            ax_png,
+            ax_csv,
+            ax_perf,
+        ]
     )
 
     # Time slider.
@@ -1799,6 +1947,10 @@ def main(initial_file=None):
             clear_probe()
         elif event.key in ("ctrl+o", "cmd+o"):
             reload_with_new_file()
+        elif event.key in ("ctrl+s", "cmd+s"):
+            export_plot_png()
+        elif event.key in ("ctrl+e", "cmd+e"):
+            export_visible_range_csv()
 
     fig.canvas.mpl_connect("button_press_event", on_probe_click)
     fig.canvas.mpl_connect("key_press_event", on_key_press)
@@ -1809,8 +1961,8 @@ def main(initial_file=None):
         [
             "Playback: Space pause/play | Left/Right step | Home/End jump to edges",
             "View: Timeline slider or Position (%) | Detail slider or Window (%)",
-            "Modes: M time/Hz | V probe (left click, right click clear) | P performance profile",
-            "Files: Open file button or Ctrl+O/Cmd+O | Channel panel toggles traces",
+            "Modes: A animation | M time/Hz | V probe (left click, right click clear) | P performance profile",
+            "Files: Open file button or Ctrl+O/Cmd+O | Save PNG: Ctrl+S | Export CSV: Ctrl+E",
         ]
     )
     plt.figtext(
@@ -1833,9 +1985,12 @@ def main(initial_file=None):
     draw_frame()
     set_status_text("Ready. Use Open file or press Play.", color="tab:green", redraw=True)
 
-    plt.gcf().canvas.manager.set_window_title(f"LVM Data Viewer - {os.path.basename(FILE)}")
+    plt.gcf().canvas.manager.set_window_title(f"LVM Signal Viewer - {os.path.basename(FILE)}")
     plt.show()
 
 
 if __name__ == "__main__":
-    main()
+    cli_file, cli_message = parse_cli_file_argument(sys.argv)
+    if cli_message == "help":
+        sys.exit(0)
+    main(initial_file=cli_file, empty_message=cli_message)
