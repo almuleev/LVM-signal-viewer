@@ -63,40 +63,11 @@ data_revision_ref = [0]  # Incremented on each successful data load/reload
 
 
 # FILE SELECTION
-def select_file(exit_on_cancel=True, show_intro=False):
+def select_file(exit_on_cancel=True):
     """Open a file selection dialog."""
     root = tk.Tk()
     root.withdraw()  # Hide root window
     root.attributes("-topmost", True)  # Keep dialog above other windows
-
-    if show_intro:
-        intro_text = "\n".join(
-            [
-                "Choose a data file to open in the viewer.",
-                "",
-                "Supported formats:",
-                "- .lvm (LabVIEW Measurement)",
-                "- .txt (tab-separated numeric data)",
-                "",
-                "Expected layout:",
-                "- First numeric column: Time",
-                "- Next numeric columns: signal channels",
-                "",
-                "Open file picker now?",
-            ]
-        )
-        should_open = messagebox.askyesno(
-            "Open Data File",
-            intro_text,
-            parent=root,
-        )
-        if not should_open:
-            root.destroy()
-            if exit_on_cancel:
-                print("File selection canceled from intro. Exiting.")
-                sys.exit()
-            print("File selection canceled from intro.")
-            return None
 
     file_path = filedialog.askopenfilename(
         title="Select .lvm or .txt file to analyze",
@@ -727,15 +698,57 @@ def set_status_text(message, color="dimgray", redraw=False):
         plt.pause(0.001)
 
 
+def show_empty_viewer():
+    """Show app window without loaded data and allow opening a file later."""
+    fig_empty, ax_empty = plt.subplots(figsize=(14, 8))
+    ax_empty.axis("off")
+    ax_empty.text(
+        0.5,
+        0.62,
+        "No file selected",
+        ha="center",
+        va="center",
+        fontsize=22,
+        weight="bold",
+    )
+    ax_empty.text(
+        0.5,
+        0.48,
+        "Click 'Open file' to load a .lvm or .txt dataset.",
+        ha="center",
+        va="center",
+        fontsize=12,
+        color="dimgray",
+    )
+
+    ax_open = plt.axes([0.42, 0.32, 0.16, 0.08])
+    btn_open = Button(ax_open, "Open file")
+
+    def on_open(event=None):
+        selected_file = select_file(exit_on_cancel=False)
+        if not selected_file:
+            return
+        plt.close(fig_empty)
+        main(initial_file=selected_file)
+
+    btn_open.on_clicked(on_open)
+    plt.gcf().canvas.manager.set_window_title("LVM Data Viewer - No file")
+    plt.show()
+
+
 # MAIN PROGRAM
-def main():
+def main(initial_file=None):
     global FILE, time, channels, n, lines, ax, fig, update_zoom_fn, draw_frame_fn, time_range_ref
     global channel_visibility, channel_data_arrays, refresh_channel_controls_fn, apply_channel_visibility_fn
     global current_frame, is_playing, current_center, zoom_level
     global info_text_obj, file_info_obj, window_percent_ref
     global clear_probe_fn
 
-    FILE = select_file(show_intro=True)
+    FILE = initial_file
+    if not FILE:
+        print("Started in empty mode.")
+        show_empty_viewer()
+        return
 
     fig, ax = plt.subplots(figsize=(14, 8))
     set_status_text("Loading file...", color="tab:orange", redraw=True)
