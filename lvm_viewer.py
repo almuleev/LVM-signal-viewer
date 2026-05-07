@@ -63,14 +63,43 @@ data_revision_ref = [0]  # Incremented on each successful data load/reload
 
 
 # FILE SELECTION
-def select_file(exit_on_cancel=True):
+def select_file(exit_on_cancel=True, show_intro=False):
     """Open a file selection dialog."""
     root = tk.Tk()
     root.withdraw()  # Hide root window
     root.attributes("-topmost", True)  # Keep dialog above other windows
 
+    if show_intro:
+        intro_text = "\n".join(
+            [
+                "Choose a data file to open in the viewer.",
+                "",
+                "Supported formats:",
+                "- .lvm (LabVIEW Measurement)",
+                "- .txt (tab-separated numeric data)",
+                "",
+                "Expected layout:",
+                "- First numeric column: Time",
+                "- Next numeric columns: signal channels",
+                "",
+                "Open file picker now?",
+            ]
+        )
+        should_open = messagebox.askyesno(
+            "Open Data File",
+            intro_text,
+            parent=root,
+        )
+        if not should_open:
+            root.destroy()
+            if exit_on_cancel:
+                print("File selection canceled from intro. Exiting.")
+                sys.exit()
+            print("File selection canceled from intro.")
+            return None
+
     file_path = filedialog.askopenfilename(
-        title="Select an LVM file to analyze",
+        title="Select .lvm or .txt file to analyze",
         filetypes=[
             ("LVM files", "*.lvm"),
             ("Text files", "*.txt"),
@@ -706,7 +735,7 @@ def main():
     global info_text_obj, file_info_obj, window_percent_ref
     global clear_probe_fn
 
-    FILE = select_file()
+    FILE = select_file(show_intro=True)
 
     fig, ax = plt.subplots(figsize=(14, 8))
     set_status_text("Loading file...", color="tab:orange", redraw=True)
@@ -792,6 +821,34 @@ def main():
         normalized = (clamped_scale - min_zoom_scale) / (max_zoom_scale - min_zoom_scale)
         return 100.0 * (normalized ** (1.0 / zoom_exponent))
 
+    def get_timeline_fraction_from_frame():
+        """Map current frame to [0..1] timeline fraction."""
+        if n <= 1:
+            return 0.0
+        return min(1.0, max(0.0, float(current_frame[0]) / float(n - 1)))
+
+    def apply_window_position_for_timeline_fraction(timeline_fraction):
+        """Place visible window according to timeline position and current zoom."""
+        frac = min(1.0, max(0.0, float(timeline_fraction)))
+        edge_tol = 1e-6
+
+        if frac <= edge_tol:
+            edge_anchor[0] = "left"
+            window_start = time[0]
+        elif frac >= 1.0 - edge_tol:
+            edge_anchor[0] = "right"
+            window_start = time[-1] - window_size[0]
+        else:
+            edge_anchor[0] = "none"
+            available_range = max(0.0, (time[-1] - time[0]) - window_size[0])
+            if available_range > 1e-12:
+                window_start = time[0] + frac * available_range
+            else:
+                window_start = time[0]
+
+        window_end = window_start + window_size[0]
+        current_center[0] = (window_start + window_end) * 0.5
+
     def update_zoom(val):
         zoom_level[0] = val
         scale_factor = zoom_to_scale_factor(zoom_level[0])
@@ -802,6 +859,7 @@ def main():
             )
         else:
             window_percent_ref[0] = 0.0
+        apply_window_position_for_timeline_fraction(get_timeline_fraction_from_frame())
         update_display_window()
         draw_frame()
 
@@ -1442,17 +1500,20 @@ def main():
     def on_time_slider(val):
         if n <= 1:
             return
-        if float(val) <= 1e-6:
-            new_anchor = "left"
-        elif float(val) >= 1.0 - 1e-6:
-            new_anchor = "right"
-        else:
-            new_anchor = "none"
 
         # Manual timeline interaction should always work and pause playback.
         if is_playing[0]:
             is_playing[0] = False
         target_frame = int(round(val * (n - 1)))
+        frame_fraction = (
+            float(target_frame) / float(n - 1) if n > 1 else 0.0
+        )
+        if frame_fraction <= 1e-6:
+            new_anchor = "left"
+        elif frame_fraction >= 1.0 - 1e-6:
+            new_anchor = "right"
+        else:
+            new_anchor = "none"
         anchor_changed = edge_anchor[0] != new_anchor
         if (
             target_frame == current_frame[0]
@@ -1465,23 +1526,10 @@ def main():
         slider_lock[0] = True
         current_frame[0] = target_frame
         if current_frame[0] < n:
-            # Map timeline slider position directly to visible window position.
-            # This prevents dead zones where dragging the slider appears to do nothing.
-            available_range = max(0.0, (time[-1] - time[0]) - window_size[0])
-            if available_range > 1e-12:
-                if edge_anchor[0] == "left":
-                    window_start = time[0]
-                elif edge_anchor[0] == "right":
-                    window_start = time[-1] - window_size[0]
-                else:
-                    window_start = time[0] + float(val) * available_range
-                window_end = window_start + window_size[0]
-                if x_axis_mode[0] == "time":
-                    ax.set_xlim(window_start, window_end)
-                current_center[0] = (window_start + window_end) * 0.5
-            else:
-                current_center[0] = time[current_frame[0]]
-                update_display_window()
+            apply_window_position_for_timeline_fraction(
+                get_timeline_fraction_from_frame()
+            )
+            update_display_window()
             draw_frame()
         slider_lock[0] = False
 
