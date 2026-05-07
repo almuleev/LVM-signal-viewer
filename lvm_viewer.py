@@ -58,6 +58,8 @@ is_loading_data = False
 info_text_obj = None
 file_info_obj = None
 window_percent_ref = [0.0]
+edge_anchor_ref = ["none"]  # "left", "right", "none"
+data_revision_ref = [0]  # Incremented on each successful data load/reload
 
 
 # FILE SELECTION
@@ -246,19 +248,25 @@ def read_lvm_file(file_path):
                 line_clean = line.replace(",", ".")
                 parts = line_clean.split("\t")
 
-                # Keep only numeric values.
-                numeric_parts = []
+                # Preserve tab positions: invalid/missing cells become NaN instead
+                # of being dropped, so channel alignment is not shifted.
+                parsed_parts = []
+                numeric_value_count = 0
                 for part in parts:
                     part = part.strip()
                     if not part:
+                        parsed_parts.append(nan_value)
                         continue
                     try:
-                        numeric_parts.append(float(part))
+                        value = float(part)
                     except ValueError:
+                        parsed_parts.append(nan_value)
                         continue
+                    parsed_parts.append(value)
+                    numeric_value_count += 1
 
-                part_count = len(numeric_parts)
-                if part_count < 2:
+                part_count = len(parsed_parts)
+                if numeric_value_count < 2:
                     continue
 
                 if not section_has_data:
@@ -267,7 +275,7 @@ def read_lvm_file(file_path):
                     if PARSER_VERBOSE:
                         print(
                             f"Numeric data found in section {current_section_idx} at line {line_index}: "
-                            f"{numeric_parts[:2]}..."
+                            f"{parsed_parts[:2]}..."
                         )
 
                 # Dynamically widen the column store when needed.
@@ -281,12 +289,12 @@ def read_lvm_file(file_path):
 
                 # Fast path: fixed-width rows (most common in LVM data sections).
                 if part_count == col_count:
-                    for col_idx, value in enumerate(numeric_parts):
+                    for col_idx, value in enumerate(parsed_parts):
                         columns[col_idx].append(value)
                         if value == value:  # Fast NaN check.
                             column_has_non_nan[col_idx] = True
                 else:
-                    for col_idx, value in enumerate(numeric_parts):
+                    for col_idx, value in enumerate(parsed_parts):
                         columns[col_idx].append(value)
                         if value == value:
                             column_has_non_nan[col_idx] = True
@@ -584,6 +592,7 @@ def reload_with_new_file(event=None):
         channel_data_arrays = [
             channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
         ]
+        data_revision_ref[0] += 1
         print(f"Loaded {len(channels.columns)} channels, {n} samples")
         print(f"Time range: {time[0]} - {time[-1]}")
 
@@ -595,6 +604,7 @@ def reload_with_new_file(event=None):
         # Reset playback state.
         current_frame[0] = 0
         is_playing[0] = False
+        edge_anchor_ref[0] = "none"
         current_center[0] = time[0] + (time[-1] - time[0]) * INITIAL_WINDOW_SIZE * 0.8
         if callable(clear_probe_fn):
             clear_probe_fn()
@@ -731,6 +741,7 @@ def main():
     channel_data_arrays = [
         channels[col].to_numpy(dtype=float, copy=False) for col in channels.columns
     ]
+    data_revision_ref[0] += 1
     print(f"Loaded {len(channels.columns)} channels, {n} samples")
     print(f"Time range: {time[0]} - {time[-1]}")
 
@@ -747,7 +758,8 @@ def main():
     # Global playback state.
     current_frame = [0]
     is_playing = [False]
-    edge_anchor = ["none"]  # "left", "right", "none"
+    edge_anchor_ref[0] = "none"
+    edge_anchor = edge_anchor_ref
     animation_enabled = [ANIMATION_DEFAULT_ENABLED]
     x_axis_mode = ["freq"]  # "time" or "freq"
     ani_ref = [None]
@@ -1036,7 +1048,7 @@ def main():
                 visible_indices = tuple(
                     i for i, is_visible in enumerate(channel_visibility) if is_visible
                 )
-                signature = (start_idx, end_idx, visible_indices)
+                signature = (int(data_revision_ref[0]), start_idx, end_idx, visible_indices)
 
                 if signature != freq_render_cache["signature"]:
                     max_fft_samples = max(1024, int(fft_samples_ref[0]))
