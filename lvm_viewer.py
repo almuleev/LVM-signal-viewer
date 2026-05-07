@@ -60,6 +60,7 @@ file_info_obj = None
 window_percent_ref = [0.0]
 edge_anchor_ref = ["none"]  # "left", "right", "none"
 data_revision_ref = [0]  # Incremented on each successful data load/reload
+active_ui_refs = {}  # Keep widget/animation references alive for non-blocking backends
 
 
 # FILE SELECTION
@@ -553,6 +554,7 @@ def reload_with_new_file(event=None):
         return
     new_file = select_file(exit_on_cancel=False)
     if not new_file:
+        set_status_text("Open canceled", color="tab:orange", redraw=True)
         return
 
     print(f"Loading new file: {new_file}")
@@ -698,40 +700,126 @@ def set_status_text(message, color="dimgray", redraw=False):
         plt.pause(0.001)
 
 
-def show_empty_viewer():
+def find_default_sample_file():
+    """Return a default sample file path if bundled samples exist."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "lvm_files_for_tests", "test.lvm"),
+        os.path.join(base_dir, "lvm_files_for_tests", "test1.lvm"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def show_empty_viewer(message=None):
     """Show app window without loaded data and allow opening a file later."""
+    global active_ui_refs
     fig_empty, ax_empty = plt.subplots(figsize=(14, 8))
+    fig_empty.patch.set_facecolor("#f4f6f9")
+    ax_empty.set_facecolor("#f4f6f9")
     ax_empty.axis("off")
     ax_empty.text(
         0.5,
-        0.62,
-        "No file selected",
+        0.74,
+        "LVM Signal Viewer",
         ha="center",
         va="center",
-        fontsize=22,
+        fontsize=26,
         weight="bold",
+        color="#1f2937",
     )
     ax_empty.text(
         0.5,
+        0.63,
+        "No file selected",
+        ha="center",
+        va="center",
+        fontsize=16,
+        weight="bold",
+        color="#374151",
+    )
+    hint_text_obj = ax_empty.text(
+        0.5,
         0.48,
-        "Click 'Open file' to load a .lvm or .txt dataset.",
+        "Open .lvm or .txt data file to start analysis.",
         ha="center",
         va="center",
         fontsize=12,
         color="dimgray",
     )
 
-    ax_open = plt.axes([0.42, 0.32, 0.16, 0.08])
-    btn_open = Button(ax_open, "Open file")
+    ax_empty.text(
+        0.5,
+        0.40,
+        "Tips: Ctrl+O in viewer reopens file picker, M switches Time/Hz mode.",
+        ha="center",
+        va="center",
+        fontsize=10.5,
+        color="#6b7280",
+    )
+
+    if message:
+        ax_empty.text(
+            0.5,
+            0.33,
+            str(message),
+            ha="center",
+            va="center",
+            fontsize=11,
+            color="#b45309",
+        )
+
+    ax_open = plt.axes([0.26, 0.20, 0.20, 0.08])
+    ax_sample = plt.axes([0.48, 0.20, 0.20, 0.08])
+    ax_exit = plt.axes([0.70, 0.20, 0.12, 0.08])
+    btn_open = Button(ax_open, "Open file", color="#dbeafe", hovercolor="#bfdbfe")
+    btn_sample = Button(ax_sample, "Open sample", color="#e0f2fe", hovercolor="#bae6fd")
+    btn_exit = Button(ax_exit, "Exit", color="#e5e7eb", hovercolor="#d1d5db")
+    sample_file = find_default_sample_file()
+    if not sample_file:
+        ax_sample.set_facecolor("#e5e7eb")
+        btn_sample.label.set_alpha(0.55)
+
+    def set_hint(message_text, color="dimgray"):
+        hint_text_obj.set_text(str(message_text))
+        hint_text_obj.set_color(color)
+        fig_empty.canvas.draw_idle()
 
     def on_open(event=None):
         selected_file = select_file(exit_on_cancel=False)
         if not selected_file:
+            set_hint("File selection canceled.", color="tab:orange")
             return
         plt.close(fig_empty)
         main(initial_file=selected_file)
 
+    def on_open_sample(event=None):
+        if not sample_file:
+            set_hint("No bundled sample file found.", color="tab:orange")
+            return
+        plt.close(fig_empty)
+        main(initial_file=sample_file)
+
+    def on_exit(event=None):
+        plt.close(fig_empty)
+
+    def on_empty_key_press(event):
+        if event.key in ("enter", "o", "ctrl+o", "cmd+o"):
+            on_open()
+        elif event.key == "escape":
+            on_exit()
+
     btn_open.on_clicked(on_open)
+    btn_sample.on_clicked(on_open_sample)
+    btn_exit.on_clicked(on_exit)
+    fig_empty.canvas.mpl_connect("key_press_event", on_empty_key_press)
+    active_ui_refs = {
+        "fig": fig_empty,
+        "widgets": [btn_open, btn_sample, btn_exit],
+        "axes": [ax_empty, ax_open, ax_sample, ax_exit],
+    }
     plt.gcf().canvas.manager.set_window_title("LVM Data Viewer - No file")
     plt.show()
 
@@ -741,8 +829,8 @@ def main(initial_file=None):
     global FILE, time, channels, n, lines, ax, fig, update_zoom_fn, draw_frame_fn, time_range_ref
     global channel_visibility, channel_data_arrays, refresh_channel_controls_fn, apply_channel_visibility_fn
     global current_frame, is_playing, current_center, zoom_level
-    global info_text_obj, file_info_obj, window_percent_ref
-    global clear_probe_fn
+    global info_text_obj, file_info_obj, window_percent_ref, status_text_obj
+    global clear_probe_fn, active_ui_refs
 
     FILE = initial_file
     if not FILE:
@@ -751,6 +839,13 @@ def main(initial_file=None):
         return
 
     fig, ax = plt.subplots(figsize=(14, 8))
+    active_ui_refs = {"fig": fig, "widgets": [], "axes": [ax]}
+    fig.patch.set_facecolor("#f7f8fa")
+    ax.set_facecolor("white")
+    # New figure starts with fresh text artists.
+    status_text_obj = None
+    info_text_obj = None
+    file_info_obj = None
     set_status_text("Loading file...", color="tab:orange", redraw=True)
 
     prepared = load_prepared_data_from_cache(FILE)
@@ -767,17 +862,23 @@ def main(initial_file=None):
     if prepared is None:
         print("Failed to prepare data from file.")
         set_status_text("Load failed", color="tab:red", redraw=True)
-        sys.exit()
+        plt.close(fig)
+        show_empty_viewer("Failed to read selected file. Please choose another file.")
+        return
 
     set_status_text("Select processing range...", color="tab:orange", redraw=True)
     selected_range = select_processing_range(prepared[1])
     if selected_range is None:
-        print("Processing range selection canceled. Exiting.")
-        sys.exit()
+        print("Processing range selection canceled.")
+        plt.close(fig)
+        show_empty_viewer("Range selection canceled.")
+        return
     prepared = apply_processing_range(prepared, selected_range[0], selected_range[1])
     if prepared is None:
-        print("Selected range has no data. Exiting.")
-        sys.exit()
+        print("Selected range has no data.")
+        plt.close(fig)
+        show_empty_viewer("Selected range has no data.")
+        return
 
     _, time, channels, n = prepared
     channel_data_arrays = [
@@ -803,7 +904,7 @@ def main(initial_file=None):
     edge_anchor_ref[0] = "none"
     edge_anchor = edge_anchor_ref
     animation_enabled = [ANIMATION_DEFAULT_ENABLED]
-    x_axis_mode = ["freq"]  # "time" or "freq"
+    x_axis_mode = ["time"]  # "time" or "freq"
     ani_ref = [None]
     slider_lock = [False]
     last_slider_frame = [-1]
@@ -1052,10 +1153,12 @@ def main(initial_file=None):
         panel_top = 0.82
         channel_control["ax"] = plt.axes([0.81, panel_top - panel_height, 0.18, panel_height])
         channel_control["ax"].set_title("Channels", fontsize=9)
+        active_ui_refs["channel_axes"] = channel_control["ax"]
 
         channel_control["widget"] = CheckButtons(
             channel_control["ax"], labels, channel_visibility
         )
+        active_ui_refs["channel_widget"] = channel_control["widget"]
 
         for text in channel_control["widget"].labels:
             text.set_fontsize(8)
@@ -1068,6 +1171,13 @@ def main(initial_file=None):
             apply_channel_visibility()
             draw_frame()
             update_info_text()
+            visible_count = sum(1 for is_visible in channel_visibility if is_visible)
+            if visible_count == 0:
+                set_status_text("No channels selected", color="tab:orange", redraw=False)
+            else:
+                set_status_text(
+                    f"{visible_count} channel(s) visible", color="tab:green", redraw=False
+                )
 
         channel_control["widget"].on_clicked(on_channel_toggle)
 
@@ -1267,19 +1377,19 @@ def main(initial_file=None):
     ax_play = plt.axes([0.2, 0.18, 0.08, 0.06])
     ax_stop = plt.axes([0.3, 0.18, 0.08, 0.06])
     ax_forw = plt.axes([0.4, 0.18, 0.08, 0.06])
-    ax_open = plt.axes([0.5, 0.18, 0.08, 0.06])
+    ax_open = plt.axes([0.49, 0.18, 0.10, 0.06])
     ax_anim = plt.axes([0.6, 0.18, 0.12, 0.06])
-    ax_mode = plt.axes([0.73, 0.18, 0.10, 0.06])
-    ax_probe = plt.axes([0.84, 0.18, 0.14, 0.06])
-    ax_perf = plt.axes([0.84, 0.24, 0.14, 0.05])
+    ax_mode = plt.axes([0.73, 0.18, 0.11, 0.06])
+    ax_probe = plt.axes([0.85, 0.18, 0.13, 0.06])
+    ax_perf = plt.axes([0.85, 0.24, 0.13, 0.05])
 
-    btn_back = Button(ax_back, "Back")
+    btn_back = Button(ax_back, "Step -")
     btn_play = Button(ax_play, "Play")
     btn_stop = Button(ax_stop, "Pause")
-    btn_forw = Button(ax_forw, "Forward")
-    btn_open = Button(ax_open, "Open")
+    btn_forw = Button(ax_forw, "Step +")
+    btn_open = Button(ax_open, "Open file")
     btn_anim = Button(ax_anim, "Anim: On")
-    btn_mode = Button(ax_mode, "X: Hz")
+    btn_mode = Button(ax_mode, "Mode: Time")
     btn_probe = Button(ax_probe, "Probe: Off")
     btn_perf = Button(ax_perf, "Perf: Bal")
 
@@ -1446,13 +1556,13 @@ def main(initial_file=None):
         clear_probe()
         x_axis_mode[0] = normalized
         if normalized == "time":
-            btn_mode.label.set_text("X: Time")
+            btn_mode.label.set_text("Mode: Time")
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Value (V)")
             set_status_text("Time mode", color="tab:green", redraw=False)
             update_display_window()
         else:
-            btn_mode.label.set_text("X: Hz")
+            btn_mode.label.set_text("Mode: Hz")
             ax.set_xlabel("Frequency (Hz)")
             ax.set_ylabel("Amplitude")
             set_status_text("Frequency mode (Hz)", color="tab:green", redraw=False)
@@ -1499,6 +1609,12 @@ def main(initial_file=None):
     btn_probe.on_clicked(toggle_probe)
     btn_perf.on_clicked(cycle_performance_profile)
     clear_probe_fn = clear_probe
+    active_ui_refs["widgets"].extend(
+        [btn_back, btn_play, btn_stop, btn_forw, btn_open, btn_anim, btn_mode, btn_probe, btn_perf]
+    )
+    active_ui_refs["axes"].extend(
+        [ax_back, ax_play, ax_stop, ax_forw, ax_open, ax_anim, ax_mode, ax_probe, ax_perf]
+    )
 
     # Time slider.
     ax_time_slider = plt.axes([0.1, 0.12, 0.7, 0.03])
@@ -1509,6 +1625,8 @@ def main(initial_file=None):
     except TypeError:
         time_slider = Slider(ax_time_slider, "Timeline", 0.0, 1.0, valinit=0.0)
     time_slider.valtext.set_visible(False)
+    active_ui_refs["widgets"].append(time_slider)
+    active_ui_refs["axes"].append(ax_time_slider)
 
     def on_time_slider(val):
         if n <= 1:
@@ -1552,6 +1670,8 @@ def main(initial_file=None):
     ax_zoom_slider = plt.axes([0.1, 0.06, 0.7, 0.03])
     zoom_slider = Slider(ax_zoom_slider, "Detail", 1, 100, valinit=50, valfmt="%d")
     zoom_slider.valtext.set_visible(False)
+    active_ui_refs["widgets"].append(zoom_slider)
+    active_ui_refs["axes"].append(ax_zoom_slider)
     zoom_slider.on_changed(update_zoom)
 
     # Direct timeline/zoom inputs (apply with Enter).
@@ -1563,6 +1683,8 @@ def main(initial_file=None):
     ax_zoom_input = plt.axes([0.83, 0.06, 0.15, 0.04])
     time_input = TextBox(ax_time_input, "", initial="0.0")
     zoom_input = TextBox(ax_zoom_input, "", initial="20.0")
+    active_ui_refs["widgets"].extend([time_input, zoom_input])
+    active_ui_refs["axes"].extend([ax_time_input, ax_zoom_input])
     ax_time_input.set_title("Position (%)", fontsize=8, pad=1, loc="left")
     ax_zoom_input.set_title("Window (%)", fontsize=8, pad=1, loc="left")
 
@@ -1685,21 +1807,31 @@ def main(initial_file=None):
     update_info_text()
     controls_text = "\n".join(
         [
-            "Controls: Space - pause/play, Left/Right - seek, Up/Down - detail, Home/End - start/end",
-            "A - animation on/off, M - time/Hz mode, P - performance profile, V - probe on/off, Esc - clear probe",
-            "Ctrl+O/Cmd+O - open file, Channels panel - toggle visibility, Position/Window - Enter",
+            "Playback: Space pause/play | Left/Right step | Home/End jump to edges",
+            "View: Timeline slider or Position (%) | Detail slider or Window (%)",
+            "Modes: M time/Hz | V probe (left click, right click clear) | P performance profile",
+            "Files: Open file button or Ctrl+O/Cmd+O | Channel panel toggles traces",
         ]
     )
-    plt.figtext(0.05, 0.915, controls_text, fontsize=8.2, ha="left", style="italic")
+    plt.figtext(
+        0.05,
+        0.913,
+        controls_text,
+        fontsize=8.5,
+        ha="left",
+        va="top",
+        color="#4b5563",
+    )
 
     ani_ref[0] = FuncAnimation(
         fig, update, interval=1000 / max(1, fps_ref[0]), blit=False, cache_frame_data=False
     )
+    active_ui_refs["animation"] = ani_ref[0]
     set_performance_profile(DEFAULT_PERF_PROFILE)
     set_animation_enabled(ANIMATION_DEFAULT_ENABLED)
     update_zoom(50)
     draw_frame()
-    set_status_text("Ready", color="tab:green", redraw=True)
+    set_status_text("Ready. Use Open file or press Play.", color="tab:green", redraw=True)
 
     plt.gcf().canvas.manager.set_window_title(f"LVM Data Viewer - {os.path.basename(FILE)}")
     plt.show()
