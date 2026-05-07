@@ -9,6 +9,7 @@ pytest-cache-files-*/
 
 # Virtual environments
 .venv/
+.venv-build/
 venv/
 env/
 
@@ -30,6 +31,7 @@ tests/_tmp/
 # Packaging artifacts
 build/
 dist/
+release/
 *.egg-info/
 *.egg
 *.whl
