@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 import uuid
 
@@ -6,10 +7,12 @@ import numpy as np
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import lvm_viewer as viewer
 
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
 SAMPLES_DIR = ROOT_DIR / "lvm_files_for_tests"
 
 

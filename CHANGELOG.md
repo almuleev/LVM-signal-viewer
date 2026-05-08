@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+- No changes yet.
+
+## [0.8.8] - 2026-05-07
+
 ### Added
 
 - Optional CLI startup file argument: `python lvm_viewer.py <path_to_lvm_or_txt>`.
