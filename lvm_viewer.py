@@ -751,14 +751,30 @@ def set_status_text(message, color="dimgray", redraw=False):
 
 def find_default_sample_file():
     """Return a default sample file path if bundled samples exist."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(base_dir, "lvm_files_for_tests", "test.lvm"),
-        os.path.join(base_dir, "lvm_files_for_tests", "test1.lvm"),
-    ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
+    search_roots = []
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    search_roots.append(script_dir)
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        search_roots.append(exe_dir)
+        meipass_dir = getattr(sys, "_MEIPASS", None)
+        if meipass_dir:
+            search_roots.append(os.path.abspath(meipass_dir))
+
+    roots = []
+    for root in search_roots:
+        normalized = os.path.abspath(root)
+        if normalized not in roots:
+            roots.append(normalized)
+
+    for root in roots:
+        for subdir in ("", "_internal"):
+            base_dir = os.path.join(root, subdir) if subdir else root
+            for name in ("test.lvm", "test1.lvm"):
+                path = os.path.join(base_dir, "lvm_files_for_tests", name)
+                if os.path.isfile(path):
+                    return path
     return None
 
 
@@ -828,8 +844,8 @@ def show_empty_viewer(message=None):
     btn_exit = Button(ax_exit, "Exit", color="#e5e7eb", hovercolor="#d1d5db")
     sample_file = find_default_sample_file()
     if not sample_file:
-        ax_sample.set_facecolor("#e5e7eb")
-        btn_sample.label.set_alpha(0.55)
+        btn_sample.label.set_text("Open sample*")
+        ax_sample.set_facecolor("#fef3c7")
 
     def set_hint(message_text, color="dimgray"):
         hint_text_obj.set_text(str(message_text))
@@ -846,7 +862,16 @@ def show_empty_viewer(message=None):
 
     def on_open_sample(event=None):
         if not sample_file:
-            set_hint("No bundled sample file found.", color="tab:orange")
+            set_hint(
+                "Sample file not found. Opening file picker instead.",
+                color="tab:orange",
+            )
+            messagebox.showwarning(
+                "Sample not available",
+                "Bundled sample file was not found.\n"
+                "Select your own .lvm or .txt file.",
+            )
+            on_open()
             return
         plt.close(fig_empty)
         main(initial_file=sample_file)
@@ -1112,7 +1137,8 @@ def main(initial_file=None, empty_message=None):
         ax.set_xlabel("Frequency (Hz)")
         ax.set_ylabel("Amplitude")
     ax.grid(True, alpha=0.3)
-    plt.subplots_adjust(bottom=0.3, right=0.8, top=0.82)
+    # Keep a dedicated bottom control zone so buttons never overlap axis labels.
+    plt.subplots_adjust(bottom=0.36, right=0.8, top=0.82)
 
     last_ylim = [None]
 
@@ -1421,18 +1447,22 @@ def main(initial_file=None, empty_message=None):
                 print("Reached end of data")
         return lines
 
-    # Time control buttons.
-    ax_back = plt.axes([0.1, 0.18, 0.08, 0.06])
-    ax_play = plt.axes([0.2, 0.18, 0.08, 0.06])
-    ax_stop = plt.axes([0.3, 0.18, 0.08, 0.06])
-    ax_forw = plt.axes([0.4, 0.18, 0.08, 0.06])
-    ax_open = plt.axes([0.49, 0.18, 0.10, 0.06])
-    ax_anim = plt.axes([0.6, 0.18, 0.12, 0.06])
-    ax_mode = plt.axes([0.73, 0.18, 0.11, 0.06])
-    ax_probe = plt.axes([0.85, 0.18, 0.13, 0.06])
-    ax_png = plt.axes([0.59, 0.24, 0.11, 0.05])
-    ax_csv = plt.axes([0.71, 0.24, 0.11, 0.05])
-    ax_perf = plt.axes([0.85, 0.24, 0.13, 0.05])
+    # Bottom control panel (two rows): transport + tools/export.
+    row1_x0, row1_y, row1_w, row1_h, row1_gap = 0.10, 0.25, 0.128, 0.05, 0.012
+    row2_x0, row2_y, row2_w, row2_h, row2_gap = 0.10, 0.19, 0.108, 0.05, 0.010
+
+    ax_back = plt.axes([row1_x0 + 0 * (row1_w + row1_gap), row1_y, row1_w, row1_h])
+    ax_play = plt.axes([row1_x0 + 1 * (row1_w + row1_gap), row1_y, row1_w, row1_h])
+    ax_stop = plt.axes([row1_x0 + 2 * (row1_w + row1_gap), row1_y, row1_w, row1_h])
+    ax_forw = plt.axes([row1_x0 + 3 * (row1_w + row1_gap), row1_y, row1_w, row1_h])
+    ax_open = plt.axes([row1_x0 + 4 * (row1_w + row1_gap), row1_y, row1_w, row1_h])
+
+    ax_anim = plt.axes([row2_x0 + 0 * (row2_w + row2_gap), row2_y, row2_w, row2_h])
+    ax_mode = plt.axes([row2_x0 + 1 * (row2_w + row2_gap), row2_y, row2_w, row2_h])
+    ax_probe = plt.axes([row2_x0 + 2 * (row2_w + row2_gap), row2_y, row2_w, row2_h])
+    ax_png = plt.axes([row2_x0 + 3 * (row2_w + row2_gap), row2_y, row2_w, row2_h])
+    ax_csv = plt.axes([row2_x0 + 4 * (row2_w + row2_gap), row2_y, row2_w, row2_h])
+    ax_perf = plt.axes([row2_x0 + 5 * (row2_w + row2_gap), row2_y, row2_w, row2_h])
 
     btn_back = Button(ax_back, "Step -")
     btn_play = Button(ax_play, "Play")

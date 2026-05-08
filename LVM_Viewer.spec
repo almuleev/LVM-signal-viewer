@@ -5,7 +5,10 @@ a = Analysis(
     ['lvm_viewer.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('lvm_files_for_tests/test.lvm', 'lvm_files_for_tests'),
+        ('lvm_files_for_tests/test1.lvm', 'lvm_files_for_tests'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
