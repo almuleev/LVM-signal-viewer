@@ -67,6 +67,19 @@ After build, verify:
 4. Timeline/zoom controls respond.
 5. `Save PNG` and `Save CSV` exports work.
 
+## Refresh Documentation Screenshots
+
+The entire UI is drawn inside a single Matplotlib figure, so screenshots can be
+rendered headlessly (no window, no desktop capture) from the bundled sample:
+
+```bash
+python tools/capture_screenshots.py
+```
+
+This regenerates `docs/assets/screenshot.png` (time view),
+`docs/assets/screenshot-hz.png` (Hz/FFT view), and `docs/assets/empty-start.png`.
+Re-run it after any UI change so the README images stay current.
+
 ## Troubleshooting
 
 - If startup fails with missing modules, reinstall dependencies in a clean virtual environment.

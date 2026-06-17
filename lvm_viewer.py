@@ -1657,6 +1657,9 @@ def main(initial_file=None, empty_message=None):
         else:
             set_axis_mode("time")
 
+    # Expose the mode setter for tests and the screenshot tool (no UI event needed).
+    active_ui_refs["set_axis_mode"] = set_axis_mode
+
     def play(event):
         if not animation_enabled[0]:
             set_status_text("Enable animation first", color="tab:orange", redraw=False)

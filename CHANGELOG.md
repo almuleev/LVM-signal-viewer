@@ -6,7 +6,17 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
-- No changes yet.
+### Added
+
+- Real product screenshots under `docs/assets/` (time view, Hz/FFT view, empty start screen).
+- `tools/capture_screenshots.py` to render faithful UI screenshots headlessly from the bundled sample.
+- README status badges (CI, latest release, license, Python, platform) and embedded screenshots in both languages.
+- `SECURITY.md` with a basic vulnerability-reporting policy.
+
+### Changed
+
+- README "Screenshot / GIF" placeholder replaced with a real `Screenshots` section.
+- Exposed the axis-mode setter via `active_ui_refs` for tests and the screenshot tool.
 
 ## [0.8.8] - 2026-05-07
 

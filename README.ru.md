@@ -2,7 +2,15 @@
 
 [English version](README.md)
 
+[![Tests](https://github.com/almuleev/LVM-signal-viewer/actions/workflows/tests.yml/badge.svg)](https://github.com/almuleev/LVM-signal-viewer/actions/workflows/tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/almuleev/LVM-signal-viewer?sort=semver)](https://github.com/almuleev/LVM-signal-viewer/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#скачать)
+
 Быстрый десктопный просмотрщик измерений LabVIEW: откройте файл, изучите сигналы и экспортируйте результаты за секунды.
+
+![LVM Signal Viewer — режим времени](docs/assets/screenshot.png)
 
 ## Скачать
 
@@ -10,12 +18,18 @@
 - Все релизные артефакты: [Releases](https://github.com/almuleev/LVM-signal-viewer/releases)
 - Запуск из исходников: клонируйте репозиторий и запустите через Python.
 
-## Скриншот / GIF
+## Скриншоты
 
-Временная заглушка для скриншота/GIF:
-- добавьте реальный скриншот в `docs/assets/screenshot.png`
-- или короткий демонстрационный GIF в `docs/assets/demo.gif`
-- затем замените этот блок на Markdown-ссылки с изображениями
+Режим частоты (Hz) с FFT-спектром:
+
+![Режим Hz / FFT](docs/assets/screenshot-hz.png)
+
+Пустой стартовый экран:
+
+![Пустой стартовый экран](docs/assets/empty-start.png)
+
+> Скриншоты рендерятся из встроенного примера командой
+> `python tools/capture_screenshots.py` — перезапустите её, чтобы обновить после изменений UI.
 
 ## Поддерживаемые форматы
 

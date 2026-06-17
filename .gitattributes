@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Treat image assets as binary (no EOL conversion, no text diffs)
+*.png binary
+*.gif binary
+
+# Large sample data: keep out of textual diffs and language statistics
+*.lvm -diff linguist-generated
