@@ -1,6 +1,20 @@
-# LVM Signal Viewer
+> **Looking for the current version? See [LVM-graph-viewer](https://github.com/almuleev/LVM-graph-viewer).**
 
 [Русская версия](README.ru.md)
+
+# ⚠️ Project Status
+
+This repository contains the original Python implementation of LVM Signal Viewer.
+
+Development has moved to [LVM-graph-viewer](https://github.com/almuleev/LVM-graph-viewer), a complete C++ rewrite with significantly improved performance.
+
+➡️ New users should use [LVM-graph-viewer](https://github.com/almuleev/LVM-graph-viewer) instead.
+
+This repository is kept for reference and historical purposes.
+
+---
+
+# LVM Signal Viewer
 
 [![Tests](https://github.com/almuleev/LVM-signal-viewer/actions/workflows/tests.yml/badge.svg)](https://github.com/almuleev/LVM-signal-viewer/actions/workflows/tests.yml)
 [![Latest release](https://img.shields.io/github/v/release/almuleev/LVM-signal-viewer?sort=semver)](https://github.com/almuleev/LVM-signal-viewer/releases/latest)
